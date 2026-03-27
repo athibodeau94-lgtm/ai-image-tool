@@ -1,111 +1,132 @@
 import streamlit as st
-from PIL import Image, ImageEnhance, ImageFilter
+import cv2
+import numpy as np
+from PIL import Image, ImageEnhance
 import io
 import zipfile
 import time
 
-# --- 1. 网页可爱风配置 ---
-st.set_page_config(page_title="高级菜品美化站", layout="wide", page_icon="🍱")
+# --- 页面基本配置 ---
+st.set_page_config(page_title="餐厅菜品美化工具", layout="wide", page_icon="🍱")
+
+# 自定义按钮样式
 st.markdown("""
     <style>
-    .stApp { background-color: #FFF9FB; } 
-    .stSidebar { background-color: #FFFFFF; border-right: 2px solid #FFE4E1; }
-    .stButton>button { width: 100%; border-radius: 25px; background-color: #FFB6C1; color: white; border: none; font-weight: bold; }
-    .stDownloadButton>button { width: 100%; background-color: #87CEEB; color: white; border-radius: 25px; font-weight: bold; }
-    h1, h2, h3 { color: #FF69B4; font-family: 'Comic Sans MS', cursive; }
+    .stButton>button { width: 100%; border-radius: 5px; height: 3em; }
+    .stDownloadButton>button { width: 100%; background-color: #FF4B4B; color: white; }
     </style>
     """, unsafe_allow_html=True)
 
+st.title("👨‍🍳 餐厅菜品专用·轻量美化系统")
+st.caption("功能：菜品暖色滤镜 + 边缘色延展填充 + 原始文件名 + 一键清空。")
+
+# --- 初始化 Session State ---
 if 'processed_files' not in st.session_state:
     st.session_state.processed_files = []
 
-# --- 2. 功能面板 ---
+# --- 侧边栏配置 ---
 with st.sidebar:
-    st.title("🍓 调料盒")
-    size_preset = st.selectbox("1. 尺寸预设", ["1920*1080 (HD)", "1000*600 (Web)", "自定义"])
-    tw, th = (1920, 1080) if "1920" in size_preset else (1000, 600)
+    st.header("1. 尺寸设置")
+    tw = st.number_input("目标宽度 (px)", value=1920, step=10)
+    th = st.number_input("目标高度 (px)", value=1080, step=10)
 
-    st.header("2. 背景深度模糊")
-    blur_r = st.slider("模糊程度 (图二质感)", 20, 150, 85)
-
-    st.header("3. 效果调优")
-    sharp_v = st.slider("去糊 (锐化)", 1.0, 3.0, 1.7)
-    bright_v = st.slider("提亮", 1.0, 2.0, 1.25)
-    filter_v = st.slider("暖色程度", 0.0, 1.0, 0.6)
-
-    st.header("4. 导出设置")
-    max_kb = st.selectbox("体积控制", ["不限制", "500KB", "1MB"])
+    st.header("2. 菜品滤镜强度")
+    filter_strength = st.slider("滤镜诱人程度", 0.0, 1.0, 0.4)
     
-    if st.button("🧼 一键清空"):
+    st.divider()
+    if st.button("🗑️ 一键清空所有文件"):
         st.session_state.processed_files = []
         st.rerun()
 
-# --- 3. 核心修复：物理级覆盖背景 ---
-def process_ultimate_logic(bytes_data):
-    raw = Image.open(io.BytesIO(bytes_data)).convert("RGB")
-    w, h = raw.size
-
-    # 【关键修复】生成一张纯白的、规定尺寸的画布，作为最底层
-    final_canvas = Image.new("RGB", (tw, th), (255, 255, 255))
-
-    # 【核心修复】强制拉伸原图铺满整个 tw*th 区域作为背景，绝不留白/黑缝
-    bg = raw.resize((tw, th), Image.Resampling.LANCZOS)
-    bg = bg.filter(ImageFilter.GaussianBlur(radius=blur_r))
+# --- 菜品专属滤镜算法 ---
+def apply_food_filter(pil_img, strength):
+    # 1. 适度提亮
+    enhancer_bright = ImageEnhance.Brightness(pil_img)
+    pil_img = enhancer_bright.enhance(1.0 + (0.15 * strength))
     
-    # 将模糊背景贴满画布
-    final_canvas.paste(bg, (0, 0))
+    # 2. 增加暖色调 (微调色彩平衡)
+    data = pil_img.getdata()
+    # 增加红色和黄色通道
+    new_data = [
+        (
+            int(r * (1.0 + 0.1 * strength)), 
+            int(g * (1.0 + 0.05 * strength)), 
+            int(b * (1.0 - 0.05 * strength))
+        ) for r, g, b in data
+    ]
+    pil_img.putdata(new_data)
+    
+    # 3. 适度增加饱和度
+    enhancer_color = ImageEnhance.Color(pil_img)
+    pil_img = enhancer_color.enhance(1.0 + (0.2 * strength))
+    
+    return pil_img
 
-    # 主体处理：垂直居中，不拉伸
-    scale = min(tw/w, th/h) if (w > tw or h > th) else 1.0
+# --- 核心处理逻辑 ---
+def process_with_food_style(bytes_data, strength):
+    img_arr = np.frombuffer(bytes_data, np.uint8)
+    img = cv2.imdecode(img_arr, cv2.IMREAD_COLOR)
+    if img is None: return None
+    
+    h, w = img.shape[:2]
+
+    # 1. 提取边缘主色调用于填充
+    edge_color = np.mean([img[0,0], img[0,w-1], img[h-1,0], img[h-1,w-1]], axis=0).astype(int)
+    canvas = np.full((th, tw, 3), edge_color, dtype=np.uint8)
+
+    # 2. 居中缩放
+    scale = min(tw/w, th/h)
     nw, nh = int(w * scale), int(h * scale)
-    main_img = raw.resize((nw, nh), Image.Resampling.LANCZOS)
+    resized_img = cv2.resize(img, (nw, nh), interpolation=cv2.INTER_AREA)
+    
+    y_off = (th - nh) // 2
+    x_off = (tw - nw) // 2
+    canvas[y_off:y_off+nh, x_off:x_off+nw] = resized_img
 
-    # 主体美化
-    main_img = ImageEnhance.Sharpness(main_img).enhance(sharp_v)
-    main_img = ImageEnhance.Brightness(main_img).enhance(bright_v)
-    if filter_v > 0:
-        r, g, b = main_img.split()
-        r = r.point(lambda i: i * (1 + 0.1 * filter_v))
-        g = g.point(lambda i: i * (1 + 0.05 * filter_v))
-        main_img = Image.merge("RGB", (r, g, b))
-        main_img = ImageEnhance.Color(main_img).enhance(1.0 + 0.25 * filter_v)
+    # 3. 应用菜品专用滤镜
+    res_pil = Image.fromarray(cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB))
+    if strength > 0:
+        res_pil = apply_food_filter(res_pil, strength)
+    
+    # 4. 保存
+    out_buf = io.BytesIO()
+    res_pil.save(out_buf, format="JPEG", quality=90, optimize=True)
+    return out_buf.getvalue()
 
-    # 贴主体
-    offset = ((tw - nw) // 2, (th - nh) // 2)
-    final_canvas.paste(main_img, offset)
+# --- 交互界面 ---
+uploaded_files = st.file_uploader(
+    "👉 拖入需要批量处理的菜品原图", 
+    accept_multiple_files=True, 
+    type=['jpg','png','jpeg']
+)
 
-    # 体积控制
-    limit = 500 * 1024 if max_kb == "500KB" else (1024 * 1024 if max_kb == "1MB" else 0)
-    q = 95
-    out = io.BytesIO()
-    while q > 15:
-        out = io.BytesIO()
-        final_canvas.save(out, format="JPEG", quality=q, optimize=True)
-        if limit == 0 or out.tell() < limit: break
-        q -= 5
-    return out.getvalue()
-
-# --- 4. 界面展示 ---
-st.title("💖 萌萌菜品美化屋")
-files = st.file_uploader("✨ 拖入图片", accept_multiple_files=True, type=['jpg','png','jpeg'])
-
-if files:
-    for f in files:
+if uploaded_files:
+    for f in uploaded_files:
         if not any(item['name'] == f.name for item in st.session_state.processed_files):
-            res = process_ultimate_logic(f.read())
-            if res:
-                save_name = f.name if f.name.lower().endswith('.jpg') else f.name.rsplit('.', 1)[0] + ".jpg"
-                st.session_state.processed_files.append({"name": save_name, "data": res})
+            with st.spinner(f'正在美化: {f.name}'):
+                result_data = process_with_food_style(f.read(), filter_strength)
+                if result_data:
+                    # 保留原名
+                    new_name = f.name if f.name.lower().endswith('.jpg') else f.name.rsplit('.', 1)[0] + ".jpg"
+                    st.session_state.processed_files.append({"name": new_name, "data": result_data})
 
 if st.session_state.processed_files:
+    st.divider()
+    
+    # 打包下载按钮
     zip_io = io.BytesIO()
     with zipfile.ZipFile(zip_io, 'w', zipfile.ZIP_DEFLATED) as zf:
         for item in st.session_state.processed_files:
             zf.writestr(item['name'], item['data'])
     
-    st.download_button("📦 打包下载", zip_io.getvalue(), f"ready_{int(time.time())}.zip", "application/zip")
+    st.download_button(
+        label=f"🚀 一键打包下载 {len(st.session_state.processed_files)} 张美化后的菜品图",
+        data=zip_io.getvalue(),
+        file_name=f"food_ready_{int(time.time())}.zip",
+        mime="application/zip"
+    )
 
-    st.subheader("📸 成果预览 (已物理除黑)")
+    # 预览
     cols = st.columns(4)
     for i, item in enumerate(st.session_state.processed_files):
         with cols[i % 4]:
