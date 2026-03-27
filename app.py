@@ -4,150 +4,185 @@ import io
 import zipfile
 import time
 
-# --- 页面高级感配置 ---
-st.set_page_config(page_title="餐影工坊 | 菜品图像高级处理", layout="wide", page_icon="🍳")
+# --- 1. 页面高级感配置 (CSS 注入) ---
+st.set_page_config(page_title="餐影工坊 Pro", layout="wide", page_icon="🍽️")
 
 st.markdown("""
     <style>
-    .stButton>button { width: 100%; border-radius: 8px; height: 3.5em; background-color: #ff4b4b; color: white; font-weight: bold; }
-    .stDownloadButton>button { width: 100%; border-radius: 8px; background-color: #28a745; color: white; }
-    div[data-testid="stExpander"] { border: none; box-shadow: 0px 4px 12px rgba(0,0,0,0.05); }
+    /* 侧边栏宽度优化：约占 1/4 */
+    [data-testid="stSidebar"] {
+        min-width: 25% !important;
+        max-width: 25% !important;
+        background-color: #fcfcfc;
+        border-right: 1px solid #eee;
+    }
+    /* 隐藏顶部红条 */
+    header {visibility: hidden;}
+    /* 按钮样式优化 */
+    .stButton>button {
+        border-radius: 4px;
+        background-color: #1a1a1a;
+        color: white;
+        border: none;
+        transition: 0.3s;
+    }
+    .stButton>button:hover {
+        background-color: #404040;
+        border: none;
+    }
+    /* 卡片式预览 */
+    .img-card {
+        border: 1px solid #f0f0f0;
+        border-radius: 8px;
+        padding: 10px;
+        background: white;
+    }
     </style>
     """, unsafe_allow_html=True)
 
-# --- 初始化状态 ---
-if 'file_key' not in st.session_state:
-    st.session_state.file_key = 0
-if 'processed_files' not in st.session_state:
-    st.session_state.processed_files = []
-
-def reset_app():
-    st.session_state.file_key += 1
-    st.session_state.processed_files = []
-    st.rerun()
-
-# --- 核心引擎：不裁切 + 垂直居中 ---
-def process_core(image_bytes, config):
-    img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+# --- 2. 核心处理逻辑 ---
+def process_engine(file, config, is_preview=False):
+    if file is None: return None
+    
+    # 读取图片
+    img = Image.open(io.BytesIO(file.getvalue() if hasattr(file, 'getvalue') else file)).convert("RGBA")
     orig_w, orig_h = img.size
     tw, th = config['size']
 
-    # 1. 计算【不裁切】的等比例缩放因子 (Contain 模式)
+    # 计算等比例缩放 (Contain模式)
     ratio = min(tw / orig_w, th / orig_h)
-    new_w = int(orig_w * ratio)
-    new_h = int(orig_h * ratio)
+    new_w, new_h = int(orig_w * ratio), int(orig_h * ratio)
     img_fit = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
 
-    # 2. 背景生成
+    # 背景处理
     if config['bg_mode'] == "深度高斯模糊":
-        # 拉伸原图铺满画布作为底色
-        bg = img.resize((tw, th), Image.Resampling.LANCZOS)
-        bg = bg.filter(ImageFilter.GaussianBlur(radius=config['blur_radius']))
-    else:
-        # 提取原图中心像素色作为底色（比纯黑高级）
-        sample_pixel = img.getpixel((orig_w//2, orig_h//2))
-        bg = Image.new("RGB", (tw, th), sample_pixel)
+        bg = img.convert("RGB").resize((tw, th), Image.Resampling.LANCZOS)
+        bg = bg.filter(ImageFilter.GaussianBlur(radius=config['blur_radius'])).convert("RGBA")
+    elif config['bg_mode'] == "特定颜色":
+        color_map = {"白色": (255,255,255,255), "黑色": (0,0,0,255), "灰色": (128,128,128,255), "透明": (0,0,0,0)}
+        bg = Image.new("RGBA", (tw, th), color_map.get(config['pure_color'], (255,255,255,255)))
+    else: # 提取原色
+        sample = img.convert("RGB").getpixel((orig_w//2, orig_h//2))
+        bg = Image.new("RGBA", (tw, th), sample + (255,))
 
-    # 3. 垂直居中合成 (不裁切，只放置)
-    offset_x = (tw - new_w) // 2
-    offset_y = (th - new_h) // 2
-    bg.paste(img_fit, (offset_x, offset_y))
+    # 居中合成
+    offset_x, offset_y = (tw - new_w) // 2, (th - new_h) // 2
+    bg.paste(img_fit, (offset_x, offset_y), img_fit)
 
-    # 4. 效果增强
-    # 提亮 & 去糊
-    bg = ImageEnhance.Brightness(bg).enhance(config['bright'])
-    bg = ImageEnhance.Sharpness(bg).enhance(config['sharp'])
+    # 效果增强 (转换回RGB处理色彩)
+    res = bg.convert("RGB")
+    res = ImageEnhance.Brightness(res).enhance(config['bright'])
+    res = ImageEnhance.Sharpness(res).enhance(config['sharp'])
     
-    # 滤镜
     if config['filter'] == "暖色调 (诱人)":
-        r, g, b = bg.split()
-        r = ImageEnhance.Brightness(r).enhance(1.15)
-        bg = Image.merge("RGB", (r, g, b))
+        r, g, b = res.split(); r = ImageEnhance.Brightness(r).enhance(1.12); res = Image.merge("RGB", (r, g, b))
     elif config['filter'] == "清爽调":
-        r, g, b = bg.split()
-        b = ImageEnhance.Brightness(b).enhance(1.1)
-        bg = Image.merge("RGB", (r, g, b))
+        r, g, b = res.split(); b = ImageEnhance.Brightness(b).enhance(1.08); res = Image.merge("RGB", (r, g, b))
 
-    # 5. 体积递归压缩
-    q = 95
+    # 输出
     out_io = io.BytesIO()
-    limit = config['limit_kb'] * 1024 if config['limit_kb'] > 0 else 99999999
+    ext = "PNG" if config.get('pure_color') == "透明" else "JPEG"
     
-    while q > 15:
-        out_io = io.BytesIO()
-        bg.save(out_io, format="JPEG", quality=q, optimize=True)
-        if out_io.tell() <= limit:
-            break
-        q -= 5
-    
-    return out_io.getvalue()
-
-# --- UI 界面 ---
-st.title("🍳 餐影工坊 · 菜品图自动美化")
-st.caption("核心逻辑：等比例缩放展示全貌，垂直居中，绝不裁切原图内容。")
-
-with st.sidebar:
-    st.header("🎨 处理参数")
-    
-    # 尺寸
-    res_opt = st.selectbox("分辨率目标", ["1920*1080", "1000*600", "自定义"])
-    if res_opt == "自定义":
-        tw = st.number_input("宽", 100, 4000, 1920)
-        th = st.number_input("高", 100, 4000, 1080)
+    if ext == "JPEG":
+        q = 95
+        limit = config['limit_kb'] * 1024 if config['limit_kb'] > 0 else 999999999
+        while q > 15:
+            out_io = io.BytesIO()
+            res.save(out_io, format="JPEG", quality=q, optimize=True)
+            if out_io.tell() <= limit or is_preview: break
+            q -= 5
     else:
-        tw, th = map(int, res_opt.split('*'))
+        bg.save(out_io, format="PNG")
+        
+    return out_io.getvalue(), ext
 
-    # 体积
-    vol_opt = st.selectbox("文件体积限制", ["500KB", "1MB", "不限制"])
-    kb = 500 if vol_opt == "500KB" else 1024 if vol_opt == "1MB" else 0
+# --- 3. 侧边栏 UI ---
+with st.sidebar:
+    st.title("⚙️ 参数配置")
+    
+    with st.expander("📏 尺寸与体积", expanded=True):
+        res_opt = st.selectbox("目标分辨率", ["1920*1080", "1000*600", "800*800", "自定义"])
+        if res_opt == "自定义":
+            tw = st.number_input("宽度(px)", 100, 4000, 1920)
+            th = st.number_input("高度(px)", 100, 4000, 1080)
+        else:
+            tw, th = map(int, res_opt.split('*'))
+        
+        vol_opt = st.selectbox("体积控制", ["不限制", "500KB", "1MB"])
+        kb = 0 if vol_opt == "不限制" else (500 if vol_opt == "500KB" else 1024)
 
-    # 背景
-    bg_m = st.radio("背景填充方式", ["深度高斯模糊", "提取原色填充"])
-    blur_val = st.slider("模糊半径", 0, 100, 40) if bg_m == "深度高斯模糊" else 0
+    with st.expander("🖼️ 背景设置", expanded=True):
+        bg_m = st.radio("填充模式", ["深度高斯模糊", "特定颜色", "提取原色"])
+        p_color = "白色"
+        b_radius = 40
+        if bg_m == "特定颜色":
+            p_color = st.selectbox("选择颜色", ["白色", "黑色", "灰色", "透明"])
+        elif bg_m == "深度高斯模糊":
+            b_radius = st.slider("模糊强度", 0, 100, 40)
 
-    # 增强
-    st.subheader("滤镜增强")
-    flt = st.selectbox("色彩风格", ["原色", "暖色调 (诱人)", "清爽调"])
-    br = st.slider("亮度调节", 0.5, 1.5, 1.05)
-    sh = st.slider("清晰度(去糊)", 1.0, 4.0, 1.8)
+    with st.expander("✨ 滤镜增强", expanded=True):
+        flt = st.selectbox("风格滤镜", ["原色", "暖色调 (诱人)", "清爽调"])
+        br = st.slider("亮度", 0.5, 1.5, 1.05)
+        sh = st.slider("锐化(去糊)", 1.0, 4.0, 1.8)
 
     st.markdown("---")
-    st.button("🗑️ 一键清空", on_click=reset_app)
+    if st.button("🗑️ 重置所有设置"):
+        st.rerun()
 
-# --- 操作区 ---
-files = st.file_uploader("拖拽图片到此处 (支持多选)", type=['jpg','jpeg','png'], 
-                         accept_multiple_files=True, key=f"up_{st.session_state.file_key}")
+# --- 4. 主界面逻辑 ---
+st.title("🍽️ 餐影工坊 Pro")
+st.caption("支持文件夹拖拽上传 • 实时效果预览 • 无损比例缩放")
+
+files = st.file_uploader("将图片或整个文件夹拖入此处", type=['jpg','jpeg','png'], accept_multiple_files=True)
 
 if files:
-    conf = {'size':(tw, th), 'limit_kb':kb, 'bg_mode':bg_m, 'blur_radius':blur_val, 
-            'filter':flt, 'bright':br, 'sharp':sh}
+    # 构建当前配置字典
+    current_conf = {
+        'size': (tw, th), 'limit_kb': kb, 'bg_mode': bg_m, 
+        'pure_color': p_color, 'blur_radius': b_radius,
+        'filter': flt, 'bright': br, 'sharp': sh
+    }
 
-    if st.button("🚀 开始批量处理"):
-        results = []
-        p_bar = st.progress(0)
-        for i, f in enumerate(files):
-            processed_bytes = process_core(f.read(), conf)
-            results.append({"name": f.name, "data": processed_bytes})
-            p_bar.progress((i + 1) / len(files))
-        st.session_state.processed_files = results
-        st.success("处理完成！")
-
-    if st.session_state.processed_files:
-        # 预览区
-        st.subheader("🖼️ 处理效果预览")
-        cols = st.columns(3)
-        for i, item in enumerate(st.session_state.processed_files[:3]):
-            cols[i % 3].image(item['data'], caption=f"预览: {item['name']}", use_container_width=True)
-
-        # 下载区
-        zip_buf = io.BytesIO()
-        with zipfile.ZipFile(zip_buf, 'w') as zf:
-            for item in st.session_state.processed_files:
-                zf.writestr(item['name'], item['data'])
+    # 实时预览区 (取第一张图)
+    st.subheader("👀 实时预览 (调整左侧参数立即生效)")
+    preview_bytes, preview_ext = process_engine(files[0], current_conf, is_preview=True)
+    
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        st.image(preview_bytes, caption=f"实时预览效果 ({tw}x{th})", use_container_width=True)
+    with col2:
+        st.info(f"**处理详情**\n- 文件名: {files[0].name}\n- 格式: {preview_ext}\n- 缩放模式: 等比例居中")
         
-        st.download_button(
-            label="📦 点击下载全部 (ZIP 压缩包)",
-            data=zip_buf.getvalue(),
-            file_name=f"dish_fixed_{int(time.time())}.zip",
-            mime="application/zip"
-        )
+        # 批量处理与下载
+        if st.button("🚀 导出全部图片"):
+            zip_name = f"{files[0].name.split('.')[0]}_{tw}x{th}.zip"
+            zip_buf = io.BytesIO()
+            
+            p_bar = st.progress(0, text="正在处理中...")
+            with zipfile.ZipFile(zip_buf, 'w') as zf:
+                for idx, f in enumerate(files):
+                    data, ext = process_engine(f, current_conf)
+                    # 保留原名，后缀根据格式调整
+                    final_name = f"{f.name.rsplit('.', 1)[0]}.{ext.lower()}"
+                    zf.writestr(final_name, data)
+                    p_bar.progress((idx + 1) / len(files))
+            
+            st.success("处理完成！")
+            st.download_button(
+                label="📥 点击下载压缩包",
+                data=zip_buf.getvalue(),
+                file_name=zip_name,
+                mime="application/zip",
+                use_container_width=True
+            )
+else:
+    # 未上传时的引导界面
+    st.markdown("""
+    <div style='text-align: center; padding: 50px; border: 2px dashed #eee; border-radius: 10px;'>
+        <p style='color: #999;'>请上传菜品图片开始美化</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+# 底部交互提示
+st.divider()
+st.caption("餐影工坊 Pro - 专注餐厅数字化图片交付")
