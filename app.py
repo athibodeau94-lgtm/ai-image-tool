@@ -6,126 +6,121 @@ import io
 import zipfile
 import time
 
-# --- 1. 页面配置与清新视觉风格 ---
-st.set_page_config(page_title="菜品图像高级处理站", layout="wide", page_icon="🥗")
+# --- 1. 页面配置与高级感视觉 ---
+st.set_page_config(page_title="高级菜品处理站", layout="wide", page_icon="🍱")
 
 st.markdown("""
     <style>
-    /* 清新薄荷绿配色 */
-    .stApp { background-color: #F7FAF9; }
-    .stButton>button { width: 100%; border-radius: 8px; background-color: #76C893; color: white; border: none; }
-    .stButton>button:hover { background-color: #52B69A; color: white; }
-    .stDownloadButton>button { width: 100%; background-color: #34A0A4; color: white; border-radius: 8px; }
-    div[data-testid="stExpander"] { background-color: white; border-radius: 10px; }
+    .stApp { background-color: #F0F4F2; }
+    .stSidebar { background-color: #FFFFFF; border-right: 1px solid #E0E0E0; }
+    .stButton>button { width: 100%; border-radius: 20px; background-color: #4A7C59; color: white; transition: 0.3s; }
+    .stButton>button:hover { background-color: #2F5233; transform: scale(1.02); }
+    .stDownloadButton>button { width: 100%; background-color: #68A357; color: white; border-radius: 20px; }
+    div[data-testid="stExpander"] { border: none; background: white; border-radius: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
     </style>
     """, unsafe_allow_html=True)
 
-# --- 2. 初始化缓存管理 ---
+# --- 2. 缓存管理 ---
 if 'processed_files' not in st.session_state:
     st.session_state.processed_files = []
 
-# --- 3. 侧边栏：参数控制中心 ---
+# --- 3. 侧边栏：精准控制 ---
 with st.sidebar:
-    st.title("🎨 处理设置")
+    st.title("🥗 处理面板")
     
-    # 尺寸设置
-    st.header("1. 尺寸与分辨率")
-    size_preset = st.selectbox("选择预设尺寸", ["1920*1080", "1000*600", "自定义"])
+    st.header("1. 分辨率预设")
+    size_preset = st.selectbox("目标尺寸", ["1920*1080", "1000*600", "自定义"])
     if size_preset == "1920*1080": tw, th = 1920, 1080
     elif size_preset == "1000*600": tw, th = 1000, 600
     else:
-        tw = st.number_input("宽度 (px)", value=1920)
-        th = st.number_input("高度 (px)", value=1080)
+        tw = st.number_input("宽", value=1920)
+        th = st.number_input("高", value=1080)
 
-    # 背景处理
-    st.header("2. 背景填充模式")
-    bg_mode = st.radio("填充方式", ["深度高斯模糊", "提取边缘原色"])
-    blur_radius = st.slider("模糊程度", 10, 100, 50) if bg_mode == "深度高斯模糊" else 0
+    st.header("2. 背景模式 (原图填充)")
+    bg_mode = st.radio("填充逻辑", ["深度高斯模糊背景", "原图直接延伸背景"])
+    blur_radius = st.slider("模糊强度", 10, 150, 80) if bg_mode == "深度高斯模糊背景" else 0
 
-    # 效果增强
-    st.header("3. 效果增强")
-    with st.expander("点击展开增强选项"):
-        sharp_val = st.slider("去糊增强", 1.0, 3.0, 1.5)
-        bright_val = st.slider("提亮程度", 1.0, 2.0, 1.2)
-        filter_val = st.slider("暖色滤镜程度", 0.0, 1.0, 0.4)
+    st.header("3. 效果调节")
+    with st.expander("美化细节"):
+        sharp_val = st.slider("去糊 (锐化)", 1.0, 3.0, 1.6)
+        bright_val = st.slider("提亮", 1.0, 2.0, 1.2)
+        filter_val = st.slider("暖色滤镜", 0.0, 1.0, 0.5)
 
-    # 体积控制
-    st.header("4. 输出限制")
-    max_kb = st.selectbox("体积控制", ["不限制", "500KB", "1MB"])
+    st.header("4. 导出控制")
+    max_kb = st.selectbox("体积限制", ["不限制", "500KB", "1MB"])
     
     st.divider()
-    if st.button("🗑️ 一键清空所有文件"):
+    if st.button("🗑️ 清空所有记录"):
         st.session_state.processed_files = []
         st.rerun()
 
-# --- 4. 核心图像处理函数 ---
-def process_full_logic(bytes_data, filename):
+# --- 4. 核心逻辑：修复背景填充 ---
+def process_full_logic(bytes_data):
     img_arr = np.frombuffer(bytes_data, np.uint8)
     img = cv2.imdecode(img_arr, cv2.IMREAD_COLOR)
     if img is None: return None
     
     h, w = img.shape[:2]
+    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    raw_pil = Image.fromarray(img_rgb)
 
-    # A. 背景生成
-    if bg_mode == "深度高斯模糊":
-        bg = cv2.resize(img, (tw, th))
-        bg_pil = Image.fromarray(cv2.cvtColor(bg, cv2.COLOR_BGR2RGB))
+    # A. 生成背景：无论是哪种模式，都先用原图铺满全屏
+    # 采用补全模式缩放原图作为背景
+    bg_pil = raw_pil.resize((tw, th), Image.Resampling.LANCZOS)
+    
+    if bg_mode == "深度高斯模糊背景":
         bg_pil = bg_pil.filter(ImageFilter.GaussianBlur(radius=blur_radius))
-    else:
-        edge_color = np.mean([img[0,0], img[0,w-1], img[h-1,0], img[h-1,w-1]], axis=0).astype(int)
-        bg_pil = Image.new("RGB", (tw, th), tuple(edge_color[::-1]))
+    # 如果是"原图直接延伸背景"，则保持 resize 后的原样，不做模糊
 
-    # B. 主体处理：垂直居中，不缩放
-    # 如果原图大于画布，则进行等比缩小以适应，否则保持原样居中
+    # B. 主体处理：垂直居中，不缩放 (除非原图比画布还大)
     scale = min(tw/w, th/h) if (w > tw or h > th) else 1.0
     nw, nh = int(w * scale), int(h * scale)
-    main_img = cv2.resize(img, (nw, nh), interpolation=cv2.INTER_AREA)
+    main_img = cv2.resize(img, (nw, nh), interpolation=cv2.INTER_CUBIC)
     main_pil = Image.fromarray(cv2.cvtColor(main_img, cv2.COLOR_BGR2RGB))
 
-    # C. 效果增强 (仅针对主体菜品)
+    # C. 效果增强
     main_pil = ImageEnhance.Sharpness(main_pil).enhance(sharp_val)
     main_pil = ImageEnhance.Brightness(main_pil).enhance(bright_val)
-    
-    # 滤镜处理
     if filter_val > 0:
-        d = main_pil.getdata()
-        new_d = [(int(r*(1+0.1*filter_val)), int(g*(1+0.05*filter_val)), int(b*(1-0.05*filter_val))) for r,g,b in d]
-        main_pil.putdata(new_d)
-        main_pil = ImageEnhance.Color(main_pil).enhance(1.0 + 0.2*filter_val)
+        enhancer = ImageEnhance.Color(main_pil)
+        main_pil = enhancer.enhance(1.0 + 0.3 * filter_val)
+        # 增加暖调
+        r, g, b = main_pil.split()
+        r = r.point(lambda i: i * (1 + 0.05 * filter_val))
+        main_pil = Image.merge("RGB", (r, g, b))
 
-    # D. 合成
+    # D. 合成：主体置于背景之上
     offset = ((tw - nw) // 2, (th - nh) // 2)
     bg_pil.paste(main_pil, offset)
 
-    # E. 体积递归压缩
+    # E. 体积控制
     limit = 0
     if max_kb == "500KB": limit = 500 * 1024
     elif max_kb == "1MB": limit = 1024 * 1024
     
     q = 95
     out_buf = io.BytesIO()
-    while q > 10:
+    while q > 15:
         out_buf = io.BytesIO()
         bg_pil.save(out_buf, format="JPEG", quality=q, optimize=True)
         if limit == 0 or out_buf.tell() < limit: break
         q -= 5
     return out_buf.getvalue()
 
-# --- 5. 网页主体交互 ---
-st.title("🍳 菜品图专业处理工作站")
-uploaded_files = st.file_uploader("📥 拖入菜品原图（支持批量，保留原文件名下载）", accept_multiple_files=True, type=['jpg','png','jpeg'])
+# --- 5. 交互界面 ---
+st.title("👨‍🍳 菜品图专业处理站 (V2.0 纯净版)")
+uploaded_files = st.file_uploader("📥 上传菜品图片 (支持批量，保留原名下载)", accept_multiple_files=True, type=['jpg','png','jpeg'])
 
 if uploaded_files:
     for f in uploaded_files:
         if not any(item['name'] == f.name for item in st.session_state.processed_files):
-            with st.spinner(f'正在处理: {f.name}'):
-                res_data = process_full_logic(f.read(), f.name)
+            with st.spinner(f'正在美化: {f.name}'):
+                res_data = process_full_logic(f.read())
                 if res_data:
-                    # 保留原文件名主体
-                    new_name = f.name if f.name.lower().endswith('.jpg') else f.name.rsplit('.', 1)[0] + ".jpg"
-                    st.session_state.processed_files.append({"name": new_name, "data": res_data})
+                    save_name = f.name if f.name.lower().endswith('.jpg') else f.name.rsplit('.', 1)[0] + ".jpg"
+                    st.session_state.processed_files.append({"name": save_name, "data": res_data})
 
-# --- 6. 结果预览与一键下载 ---
+# --- 6. 结果预览与下载 ---
 if st.session_state.processed_files:
     st.divider()
     zip_io = io.BytesIO()
@@ -134,13 +129,13 @@ if st.session_state.processed_files:
             zf.writestr(item['name'], item['data'])
     
     st.download_button(
-        label=f"🟢 一键打包下载 {len(st.session_state.processed_files)} 张处理完成的图片",
+        label=f"🟢 下载全部 {len(st.session_state.processed_files)} 张纯净菜品图",
         data=zip_io.getvalue(),
-        file_name=f"processed_images_{int(time.time())}.zip",
+        file_name=f"food_export_{int(time.time())}.zip",
         mime="application/zip"
     )
 
-    st.subheader("🖼️ 处理预览窗口")
+    st.subheader("🖼️ 处理结果预览")
     cols = st.columns(4)
     for i, item in enumerate(st.session_state.processed_files):
         with cols[i % 4]:
