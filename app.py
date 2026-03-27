@@ -1,26 +1,26 @@
 import streamlit as st
 import cv2
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageEnhance
 import io
 import zipfile
 import time
 
 # --- 页面基本配置 ---
-st.set_page_config(page_title="菜品背景自动延展工具", layout="wide", page_icon="🍳")
+st.set_page_config(page_title="餐厅菜品美化工具", layout="wide", page_icon="🍱")
 
-# 自定义 CSS 样式
+# 自定义按钮样式
 st.markdown("""
     <style>
     .stButton>button { width: 100%; border-radius: 5px; height: 3em; }
-    .stDownloadButton>button { width: 100%; background-color: #4CAF50; color: white; }
+    .stDownloadButton>button { width: 100%; background-color: #FF4B4B; color: white; }
     </style>
     """, unsafe_allow_html=True)
 
-st.title("👨‍🍳 菜品图原色填充工具 (无 AI 干扰版)")
-st.caption("功能：提取原图边缘色填充尺寸 + 保留原名 + 一键清空缓存。")
+st.title("👨‍🍳 餐厅菜品专用·轻量美化系统")
+st.caption("功能：菜品暖色滤镜 + 边缘色延展填充 + 原始文件名 + 一键清空。")
 
-# --- 初始化 Session State 用于管理文件列表 ---
+# --- 初始化 Session State ---
 if 'processed_files' not in st.session_state:
     st.session_state.processed_files = []
 
@@ -30,108 +30,103 @@ with st.sidebar:
     tw = st.number_input("目标宽度 (px)", value=1920, step=10)
     th = st.number_input("目标高度 (px)", value=1080, step=10)
 
-    st.header("2. 导出设置")
-    max_kb_limit = st.selectbox("单张体积限制", ["500KB", "1MB", "不限制"])
+    st.header("2. 菜品滤镜强度")
+    filter_strength = st.slider("滤镜诱人程度", 0.0, 1.0, 0.4)
     
     st.divider()
-    # 一键清空按钮
-    if st.button("🗑️ 一键清空处理记录"):
+    if st.button("🗑️ 一键清空所有文件"):
         st.session_state.processed_files = []
         st.rerun()
 
-# --- 核心图像处理：边缘色填充 ---
-def extend_image_with_edge_color(bytes_data):
+# --- 菜品专属滤镜算法 ---
+def apply_food_filter(pil_img, strength):
+    # 1. 适度提亮
+    enhancer_bright = ImageEnhance.Brightness(pil_img)
+    pil_img = enhancer_bright.enhance(1.0 + (0.15 * strength))
+    
+    # 2. 增加暖色调 (微调色彩平衡)
+    data = pil_img.getdata()
+    # 增加红色和黄色通道
+    new_data = [
+        (
+            int(r * (1.0 + 0.1 * strength)), 
+            int(g * (1.0 + 0.05 * strength)), 
+            int(b * (1.0 - 0.05 * strength))
+        ) for r, g, b in data
+    ]
+    pil_img.putdata(new_data)
+    
+    # 3. 适度增加饱和度
+    enhancer_color = ImageEnhance.Color(pil_img)
+    pil_img = enhancer_color.enhance(1.0 + (0.2 * strength))
+    
+    return pil_img
+
+# --- 核心处理逻辑 ---
+def process_with_food_style(bytes_data, strength):
     img_arr = np.frombuffer(bytes_data, np.uint8)
     img = cv2.imdecode(img_arr, cv2.IMREAD_COLOR)
     if img is None: return None
     
     h, w = img.shape[:2]
 
-    # 1. 提取边缘的主导颜色 (取四角的平均值)
-    top_left = img[0, 0]
-    top_right = img[0, w-1]
-    bottom_left = img[h-1, 0]
-    bottom_right = img[h-1, w-1]
-    avg_color = np.mean([top_left, top_right, bottom_left, bottom_right], axis=0).astype(int)
-    
-    # 2. 创建纯色画布
-    canvas = np.full((th, tw, 3), avg_color, dtype=np.uint8)
+    # 1. 提取边缘主色调用于填充
+    edge_color = np.mean([img[0,0], img[0,w-1], img[h-1,0], img[h-1,w-1]], axis=0).astype(int)
+    canvas = np.full((th, tw, 3), edge_color, dtype=np.uint8)
 
-    # 3. 按照高度比例缩放原图，使其居中
-    scale = th / h
-    nw, nh = int(w * scale), th
-    
-    # 如果缩放后宽度超过画布，则按宽度缩放
-    if nw > tw:
-        scale = tw / w
-        nw, nh = tw, int(h * scale)
-        
+    # 2. 居中缩放
+    scale = min(tw/w, th/h)
+    nw, nh = int(w * scale), int(h * scale)
     resized_img = cv2.resize(img, (nw, nh), interpolation=cv2.INTER_AREA)
     
-    # 4. 将缩放后的图贴到画布中心
     y_off = (th - nh) // 2
     x_off = (tw - nw) // 2
     canvas[y_off:y_off+nh, x_off:x_off+nw] = resized_img
 
-    # 5. 转换为 PIL 进行保存
+    # 3. 应用菜品专用滤镜
     res_pil = Image.fromarray(cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB))
+    if strength > 0:
+        res_pil = apply_food_filter(res_pil, strength)
     
-    # 6. 体积控制
-    limit_bytes = 0
-    if max_kb_limit == "500KB": limit_bytes = 500 * 1024
-    elif max_kb_limit == "1MB": limit_bytes = 1024 * 1024
-    
-    q = 95
+    # 4. 保存
     out_buf = io.BytesIO()
-    while q > 10:
-        out_buf = io.BytesIO()
-        res_pil.save(out_buf, format="JPEG", quality=q, optimize=True)
-        if limit_bytes == 0 or out_buf.tell() < limit_bytes:
-            break
-        q -= 5
-        
+    res_pil.save(out_buf, format="JPEG", quality=90, optimize=True)
     return out_buf.getvalue()
 
-# --- 文件上传逻辑 ---
+# --- 交互界面 ---
 uploaded_files = st.file_uploader(
-    "👉 请拖入需要处理的菜品图片", 
+    "👉 拖入需要批量处理的菜品原图", 
     accept_multiple_files=True, 
-    type=['jpg','png','jpeg'],
-    key="file_uploader"
+    type=['jpg','png','jpeg']
 )
 
 if uploaded_files:
-    # 仅处理新上传的文件
     for f in uploaded_files:
-        # 检查是否已经在 session 中（防止重复处理）
         if not any(item['name'] == f.name for item in st.session_state.processed_files):
-            with st.spinner(f'正在处理: {f.name}'):
-                result_data = extend_image_with_edge_color(f.read())
+            with st.spinner(f'正在美化: {f.name}'):
+                result_data = process_with_food_style(f.read(), filter_strength)
                 if result_data:
-                    st.session_state.processed_files.append({
-                        "name": f.name if f.name.lower().endswith('.jpg') else f.name.rsplit('.', 1)[0] + ".jpg",
-                        "data": result_data
-                    })
+                    # 保留原名
+                    new_name = f.name if f.name.lower().endswith('.jpg') else f.name.rsplit('.', 1)[0] + ".jpg"
+                    st.session_state.processed_files.append({"name": new_name, "data": result_data})
 
-# --- 显示结果与下载 ---
 if st.session_state.processed_files:
-    st.success(f"当前共有 {len(st.session_state.processed_files)} 张待下载图片")
+    st.divider()
     
-    # 打包下载
+    # 打包下载按钮
     zip_io = io.BytesIO()
     with zipfile.ZipFile(zip_io, 'w', zipfile.ZIP_DEFLATED) as zf:
         for item in st.session_state.processed_files:
             zf.writestr(item['name'], item['data'])
     
     st.download_button(
-        label="📦 一键打包下载全部处理后的文件",
+        label=f"🚀 一键打包下载 {len(st.session_state.processed_files)} 张美化后的菜品图",
         data=zip_io.getvalue(),
-        file_name=f"batch_processed_{int(time.time())}.zip",
+        file_name=f"food_ready_{int(time.time())}.zip",
         mime="application/zip"
     )
 
-    # 预览区域
-    st.divider()
+    # 预览
     cols = st.columns(4)
     for i, item in enumerate(st.session_state.processed_files):
         with cols[i % 4]:
