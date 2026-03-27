@@ -14,7 +14,7 @@ except ImportError:
     PDF_SUPPORT = False
 
 # --- 1. 页面配置 ---
-st.set_page_config(page_title="餐影工坊 PDF全预览版", layout="wide", page_icon="🍽️")
+st.set_page_config(page_title="餐影工坊1.0", layout="wide", page_icon="🍽️")
 
 if 'upload_key' not in st.session_state:
     st.session_state.upload_key = 0
