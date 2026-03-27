@@ -2,3 +2,6 @@ streamlit
 opencv-python-headless
 pillow
 numpy
+segment-anything
+scikit-image
+requests
