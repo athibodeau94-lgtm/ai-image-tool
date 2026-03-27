@@ -72,7 +72,6 @@ def process_engine(img_input, config, is_preview=False):
     tw, th = config['size']
     # 预览加速逻辑
     render_w, render_h = (tw // 2, th // 2) if is_preview else (tw, th)
-    
     img.thumbnail((render_w, render_h), Image.Resampling.LANCZOS)
     
     if config['bg_mode'] == "深度高斯模糊":
@@ -115,9 +114,21 @@ with st.sidebar:
     st.markdown("---")
     
     res_opt = st.selectbox("分辨率预设", ["1920*1080", "1000*600", "800*800", "自定义"])
-    tw, th = map(int, res_opt.split('*')) if res_opt != "自定义" else (1920, 1080)
+    if res_opt == "自定义":
+        tw = st.number_input("宽", 100, 4000, 1920); th = st.number_input("高", 100, 4000, 1080)
+    else:
+        tw, th = map(int, res_opt.split('*'))
 
-    kb = st.slider("体积上限 (KB)", 100, 2048, 500)
+    # --- 恢复体积控制逻辑 ---
+    vol_opt = st.selectbox("体积控制", ["不限制", "500KB", "1MB", "自定义"])
+    kb = 0
+    if vol_opt == "自定义":
+        kb = st.number_input("限制 (KB)", 10, 5120, 500)
+    elif vol_opt == "500KB":
+        kb = 500
+    elif vol_opt == "1MB":
+        kb = 1024
+
     st.markdown("---")
     auto_crop = st.toggle("多主体自动拆解", value=True)
     bg_m = st.radio("背景模式", ["深度高斯模糊", "特定颜色", "提取原色"])
@@ -131,7 +142,7 @@ with st.sidebar:
 # --- 5. 主界面 ---
 st.title("🍽️ 餐影工坊 1.0")
 
-files = st.file_uploader("点击或拖拽上传图片/PDF文件", type=['jpg','jpeg','png','pdf'], 
+files = st.file_uploader("上传图片或PDF文件", type=['jpg','jpeg','png','pdf'], 
                          accept_multiple_files=True, key=f"up_{st.session_state.upload_key}")
 
 if files:
@@ -141,12 +152,13 @@ if files:
             if f.name.lower().endswith('.pdf') and PDF_SUPPORT:
                 pages = convert_from_bytes(f.read(), dpi=200)
                 for i, p in enumerate(pages):
+                    page_name = f.name.rsplit('.', 1)[0]
                     if auto_crop:
                         for idx, dish in enumerate(smart_extract_multiple_subjects(p)):
-                            dish.filename = f"{f.name.rsplit('.', 1)[0]}_P{i+1}_{idx+1}.jpg"
+                            dish.filename = f"{page_name}_P{i+1}_{idx+1}.jpg"
                             final_list.append(dish)
                     else:
-                        p.filename = f"{f.name.rsplit('.', 1)[0]}_P{i+1}.jpg"; final_list.append(p)
+                        p.filename = f"{page_name}_P{i+1}.jpg"; final_list.append(p)
             else:
                 final_list.append(f)
 
@@ -178,4 +190,4 @@ if files:
                     p_bar.progress((idx+1)/len(final_list))
             st.download_button("📥 立即下载", zip_buf.getvalue(), f"Batch_{datetime.now().strftime('%H%M')}.zip", use_container_width=True)
 else:
-    st.info("💡 这是一个可以自动从 PDF 菜单中拆分菜品图片的智能工具。请上传文件开始体验。")
+    st.info("💡 提示：上传 PDF 菜单，工具将自动识别并拆分菜品主体。")
