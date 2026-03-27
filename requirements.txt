@@ -1,5 +1,5 @@
 streamlit
 Pillow
 opencv-python-headless
-pdf2image
 numpy
+pdf2image
