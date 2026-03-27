@@ -1,148 +1,148 @@
 import streamlit as st
 import cv2
 import numpy as np
-from PIL import Image, ImageEnhance
-import os
+from PIL import Image, ImageEnhance, ImageFilter
 import io
 import zipfile
 import time
 
-# --- 页面配置 ---
-st.set_page_config(page_title="AI 文件夹图像处理站", layout="wide")
-st.title("📂 智能图像文件夹自动化处理站")
-st.caption("支持整个文件夹上传、AI 修复（去暗/去糊/自动旋转）、批量打包下载")
+# --- 页面基本配置 ---
+st.set_page_config(page_title="餐厅菜品智能处理站", layout="wide", page_icon="🍳")
 
-# --- 侧边栏设置 ---
+# 标题与介绍
+st.title("👨‍🍳 餐厅菜品无水印自动美化系统")
+st.caption("针对菜品图优化：自动纠正朝向、去除丑陋黑边、增强画质、严格体积控制。下载纯净图片，绝无水印。")
+
+# --- 侧边栏配置 ---
 with st.sidebar:
-    st.header("1. 输出配置")
-    tw = st.number_input("目标宽度 (px)", value=1920, step=10)
-    th = st.number_input("目标高度 (px)", value=1080, step=10)
-    
-    st.header("2. AI 修复开关")
-    auto_rotate = st.checkbox("自动矫正旋转 (人脸检测演示版)", value=True)
-    auto_bright = st.checkbox("自动增强亮度 (去暗)", value=True)
-    auto_sharp = st.checkbox("自动增强清晰度 (去糊)", value=True)
-    
-    st.header("3. 保存设置")
-    quality = st.slider("保存质量 (JPEG)", 10, 100, 85)
+    st.header("1. 输出尺寸预设")
+    size_mode = st.radio("选择分辨率", ["1920*1080 (HD)", "1000*600 (Web)", "自定义"])
+    if size_mode == "1920*1080 (HD)": tw, th = 1920, 1080
+    elif size_mode == "1000*600 (Web)": tw, th = 1000, 600
+    else:
+        tw = st.number_input("宽 (px)", value=1920, step=10)
+        th = st.number_input("高 (px)", value=1080, step=10)
 
-# --- 核心 AI 处理函数 ---
-def smart_ai_process(bytes_data, file_name):
-    # 1. 解码
-    arr = np.frombuffer(bytes_data, np.uint8)
-    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-    if img is None: return None, "无法读取图片"
+    st.header("2. 体积控制")
+    max_kb_limit = st.selectbox("文件大小限制", ["500KB", "1MB", "2MB", "不限制"])
+    
+    st.header("3. 效果增强")
+    sharp_level = st.slider("清晰度增强 (去糊)", 1.0, 3.0, 1.6, step=0.1)
+    color_level = st.slider("色彩鲜艳度 (提色)", 1.0, 2.0, 1.3, step=0.1)
+    
+    st.info("💡 提示：此版本使用高级模糊填充代替黑边，实现基础居中效果。若需‘凭空补全’被切碗，请在未来升级 AI API 版本。")
 
-    # [演示版逻辑] 真正的 AI 人脸矫正需调用 DeepFace 等库，这里使用基础算法演示
-    # 2. 自动纠正旋转
+# --- 核心图像算法 (OpenCV + Pillow) ---
+def process_food_image_pure(bytes_data):
+    # 1. 基础读取
+    img_arr = np.frombuffer(bytes_data, np.uint8)
+    img = cv2.imdecode(img_arr, cv2.IMREAD_COLOR)
+    if img is None: return None
+    
+    # 2. 自动朝向纠正 (核心逻辑：餐厅菜品通常需要横图呈现)
     h, w = img.shape[:2]
-    # 此处逻辑：如果它是竖图 (h > w)，自动把她转成横图 (h < w)
-    if auto_rotate and h > w:
+    # 如果高度大于宽度（竖图），自动顺时针旋转90度
+    if h > w:
         img = cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
-        h, w = img.shape[:2] # 更新尺寸
+        h, w = img.shape[:2] # 更新旋转后的尺寸
 
-    # 3. 尺寸缩放并填充 (使其变为 1920x1080 并居中)
-    canvas = np.zeros((th, tw, 3), dtype=np.uint8) # 黑色背景填充
-    scale = min(tw/w, th/h)
-    nw, nh = int(w*scale), int(h*scale)
-    rsz = cv2.resize(img, (nw, nh), interpolation=cv2.INTER_AREA)
-    y, x = (th-nh)//2, (tw-nw)//2
-    canvas[y:y+nh, x:x+nw] = rsz
+    # 3. 创建“高级感”模糊背景（模仿图三，彻底解决丑陋黑边）
+    # 先把原图拉伸到目标全屏尺寸，作为背景
+    bg_blur = cv2.resize(img, (tw, th), interpolation=cv2.INTER_LINEAR)
+    # 转换到 PIL 进行深度高斯模糊
+    bg_pil = Image.fromarray(cv2.cvtColor(bg_blur, cv2.COLOR_BGR2RGB))
+    bg_pil = bg_pil.filter(ImageFilter.GaussianBlur(radius=70)) # 强力模糊，营造氛围
+
+    # 4. 处理主体菜品 (居中缩放与美化)
+    # 让菜品占据目标高度的 88%，确保视觉大小一致
+    target_h = int(th * 0.88)
+    scale = target_h / h
+    target_w = int(w * scale)
     
-    # 4. 自动画质增强 (转换到 PIL 进行)
-    final_img = canvas
-    if auto_bright or auto_sharp:
-        pil_img = Image.fromarray(cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB))
+    # 如果缩放后宽度超标，重新按宽度缩放
+    if target_w > tw * 0.92:
+        scale = (tw * 0.92) / w
+        target_w = int(tw * 0.92)
+        target_h = int(h * scale)
         
-        # 处理过暗 (亮度检测与自动对比度)
-        if auto_bright:
-            stat = ImageEnhance.Brightness(pil_img).enhance(1.0)
-            avg_b = np.mean(np.array(stat.convert('L')))
-            if avg_b < 110: # 平均亮度较低
-                enhancer = ImageEnhance.Contrast(pil_img)
-                pil_img = enhancer.enhance(1.2) # 自动提高对比度
+    img_rsz = cv2.resize(img, (target_w, target_h), interpolation=cv2.INTER_CUBIC)
+    main_pil = Image.fromarray(cv2.cvtColor(img_rsz, cv2.COLOR_BGR2RGB))
+
+    # 5. 菜品专属色彩与清晰度增强
+    main_pil = ImageEnhance.Color(main_pil).enhance(color_level) # 提色
+    main_pil = ImageEnhance.Sharpness(main_pil).enhance(sharp_level) # 去糊
+    main_pil = ImageEnhance.Contrast(main_pil).enhance(1.1) # 微调对比度
+
+    # 6. 合成：将纯净美化后的菜品贴在模糊背景中心
+    offset = ((tw - target_w) // 2, (th - target_h) // 2)
+    # 粘贴过程中不会产生任何水印
+    bg_pil.paste(main_pil, offset)
+
+    # 7. 严格体积递归压缩控制
+    limit_bytes = 0
+    if max_kb_limit == "500KB": limit_bytes = 500 * 1024
+    elif max_kb_limit == "1MB": limit_bytes = 1024 * 1024
+    elif max_kb_limit == "2MB": limit_bytes = 2048 * 1024
+    
+    q = 98 # 初始质量
+    out_buf = io.BytesIO()
+    
+    # 递归下调质量，直到满足体积要求
+    while q > 15:
+        out_buf = io.BytesIO()
+        # 保存为无水印、纯净的 JPEG
+        bg_pil.save(out_buf, format="JPEG", quality=q, optimize=True)
+        if limit_bytes == 0 or out_buf.tell() < limit_bytes:
+            break
+        q -= 4 # 质量步进下调
         
-        # 处理模糊 (简单的锐化卷积)
-        if auto_sharp:
-            sharp = ImageEnhance.Sharpness(pil_img)
-            pil_img = sharp.enhance(1.8) # 自动提高清晰度
-        
-        # 转回 OpenCV 格式保存
-        final_img = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+    return out_buf.getvalue(), q
 
-    return final_img, "处理成功"
-
-# --- 核心逻辑 ---
-
-# 1. 这里是实现“选择文件夹”的关键
-uploaded_files = st.file_uploader(
-    "【点击按钮，直接选择包含图片的整个文件夹】", 
+# --- 网页交互逻辑 (Streamlit) ---
+files = st.file_uploader(
+    "👉 点击或直接拖拽整个菜品文件夹（图片）到这里", 
     accept_multiple_files=True, 
-    type=['jpg','jpeg','png'],
-    key="folder_uploader"
+    type=['jpg','png','jpeg']
 )
 
-# 用于存储处理好的图片，供压缩使用
-processed_files = []
-
-if uploaded_files:
-    # 过滤出图片文件，并获取文件夹名称 (假设都在同一个文件夹下)
-    img_files = [f for f in uploaded_files if f.type.startswith('image/')]
+if files:
+    processed_list = []
+    st.info(f"正在准备批量处理 {len(files)} 张菜品图片，请稍候...")
     
-    if not img_files:
-        st.error("文件夹中未检测到有效的图片文件 (仅支持 .jpg, .png)。")
-    else:
-        # 获取最顶层文件夹名称 (用于 Zip 文件命名)
-        first_file_path = img_files[0].name
-        base_folder_name = first_file_path.split('/')[0] if '/' in first_file_path else "images"
+    # 创建进度条
+    bar = st.progress(0)
+    
+    for i, f in enumerate(files):
+        # 处理图片得到纯净数据和最终质量
+        result_data, final_q = process_food_image_pure(f.read())
         
-        st.success(f"📂 已成功读取文件夹: {base_folder_name}")
-        st.info(f"✨ 共检测到 {len(img_files)} 张图片，正在进行 AI 修复...")
+        if result_data:
+            processed_list.append((f"pure_fixed_{f.name.split('.')[0]}.jpg", result_data))
         
-        # 2. 进度条与处理
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        
-        for idx, file in enumerate(img_files):
-            try:
-                # 处理
-                final_res, msg = smart_ai_process(file.read(), file.name)
-                
-                if final_res is not None:
-                    # 3. 编码并暂存
-                    _, buf = cv2.imencode(".jpg", final_res, [cv2.IMWRITE_JPEG_QUALITY, quality])
-                    # 移除原始路径中的斜杠，防止解压时出错
-                    clean_name = file.name.replace('/', '_')
-                    processed_files.append((f"fixed_{clean_name}.jpg", buf.tobytes()))
-                
-                # 更新进度
-                curr_p = int(((idx+1) / len(img_files)) * 100)
-                progress_bar.progress(curr_p)
-                status_text.text(f"已完成: {file.name} ({curr_p}%)")
-                
-            except Exception as e:
-                st.warning(f"处理失败: {file.name} - {str(e)}")
+        # 更新进度
+        bar.progress((i + 1) / len(files))
 
-        progress_bar.empty()
-        status_text.success(f"✅ 处理完成！全部图片已修复。")
+    if processed_list:
+        st.success(f"✅ 处理完成！共生成 {len(processed_list)} 张无水印纯净图片。")
         
-        # 3. 提供 Zip 打包下载 (最关键的一步)
-        if processed_files:
-            # 在内存中创建 Zip 文件
-            zip_buffer = io.BytesIO()
-            with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
-                for filename, file_data in processed_files:
-                    zip_file.writestr(filename, file_data)
-            
-            zip_buffer.seek(0)
-            
-            # 按钮区域
-            c1, c2, c3 = st.columns(3)
-            with c2:
-                st.download_button(
-                    label=f"👉 点击下载整个文件夹 ({len(processed_files)} 张已修复图片) 👈",
-                    data=zip_buffer,
-                    file_name=f"{base_folder_name}_fixed_{int(time.time())}.zip",
-                    mime="application/zip",
-                    use_container_width=True
-                )
+        # 批量打包
+        zip_io = io.BytesIO()
+        with zipfile.ZipFile(zip_io, 'w', zipfile.ZIP_DEFLATED) as zf:
+            for name, data in processed_list:
+                zf.writestr(name, data)
+        
+        # 提供一个显眼的、一键下载的按钮
+        st.download_button(
+            label="📦 一键打包下载全部纯净图片 (Zip压缩包)",
+            data=zip_io.getvalue(),
+            file_name=f"restaurant_pure_fixed_{int(time.time())}.zip",
+            mime="application/zip",
+            use_container_width=True
+        )
+        
+        # 预览功能 (为了展示无水印效果)
+        st.subheader("处理结果预览 (前3张)")
+        cols = st.columns(3)
+        for i, (name, data) in enumerate(processed_list[:3]):
+            # st.image 显示的图片直接来源于处理好的纯净数据
+            cols[i].image(data, caption=f"{name} (无水印)", use_container_width=True)
