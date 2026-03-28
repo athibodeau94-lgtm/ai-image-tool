@@ -1,2 +1,4 @@
-libpoppler-cpp-dev
-poppler-utils
+easyocr
+scikit-image
+# 确保 opencv 依然是 headless 版本
+opencv-python-headless
