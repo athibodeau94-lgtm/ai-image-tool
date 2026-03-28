@@ -26,19 +26,12 @@ def reset_uploader():
 # --- 极致紧凑样式 ---
 st.markdown("""
     <style>
-    /* 侧边栏顶部和组件间距最小化 */
     [data-testid="stSidebar"] [data-testid="stVerticalBlock"] { gap: 0.2rem !important; padding-top: 0rem !important; }
     [data-testid="stSidebar"] * { font-size: 0.85rem !important; }
     [data-testid="stSidebar"] { min-width: 25% !important; }
     header {visibility: hidden;}
-    
-    /* 按钮样式 */
     div[data-testid="stSidebar"] button:first-child { background-color: #ff4b4b !important; color: white !important; border: none !important; height: 2rem !important;}
-    
-    /* 预览图样式 */
     .stImage { border-radius: 6px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-    
-    /* 调整输入框和滑块高度 */
     div[data-testid="stNumberInput"] { margin-bottom: -1rem !important; }
     div[data-testid="stSlider"] { margin-bottom: -0.5rem !important; }
     </style>
@@ -107,8 +100,6 @@ def process_engine(img_input, config, is_preview=False):
 # --- 4. 极致紧凑侧边栏 ---
 with st.sidebar:
     st.button("🗑️ 清空列表", on_click=reset_uploader, use_container_width=True)
-    
-    # 分辨率与体积并排
     c1, c2 = st.columns(2)
     with c1:
         res_opt = st.selectbox("分辨率", ["1920*1080", "1000*600", "800*800", "自定义"])
@@ -120,16 +111,11 @@ with st.sidebar:
     if vol_opt == "自定义": kb = st.number_input("KB", 10, 5120, 500)
     elif vol_opt == "500KB": kb = 500
     elif vol_opt == "1MB": kb = 1024
-
     auto_crop = st.toggle("多主体拆解", value=True)
-    
-    # 背景与颜色/模糊并排
     bg_m = st.selectbox("背景模式", ["深度高斯模糊", "特定颜色", "提取原色"])
     p_color, b_radius = "白色", 40
     if bg_m == "特定颜色": p_color = st.selectbox("颜色", ["白色", "黑色", "灰色", "透明"])
     elif bg_m == "深度高斯模糊": b_radius = st.slider("模糊程度", 10, 100, 40)
-
-    # 滤镜与画质
     flt = st.selectbox("滤镜效果", ["原色", "暖色调", "清爽调"])
     br = st.slider("亮度", 0.5, 1.5, 1.05)
     sh = st.slider("锐化", 1.0, 4.0, 1.8)
@@ -167,17 +153,25 @@ if files:
                 p_bytes, _ = process_engine(item, conf, is_preview=True)
                 st.image(p_bytes, use_container_width=True, caption=getattr(item, 'filename', getattr(item, 'name', f"Img_{idx+1}")))
 
+    # --- 6. 导出功能判断 ---
     with st.sidebar:
         st.success(f"就绪: {len(final_list)} 张")
-        if st.button("🚀 导出 ZIP", use_container_width=True):
-            zip_buf = io.BytesIO()
-            p_bar = st.progress(0, text="打包中...")
-            with zipfile.ZipFile(zip_buf, 'w') as zf:
-                for idx, itm in enumerate(final_list):
-                    data, ext = process_engine(itm, conf)
-                    name_raw = getattr(itm, 'filename', getattr(itm, 'name', f"output_{idx}.jpg"))
-                    zf.writestr(f"{name_raw.rsplit('.', 1)[0]}.{ext.lower()}", data)
-                    p_bar.progress((idx+1)/len(final_list))
-            st.download_button("📥 立即下载", zip_buf.getvalue(), f"Batch_{datetime.now().strftime('%H%M')}.zip", use_container_width=True)
+        if len(final_list) == 1:
+            data, ext = process_engine(final_list[0], conf)
+            raw_name = getattr(final_list[0], 'filename', getattr(final_list[0], 'name', "output.jpg"))
+            final_name = f"{raw_name.rsplit('.', 1)[0]}.{ext.lower()}"
+            # 此处已修改按钮名称
+            st.download_button("📥 下载图片", data, final_name, use_container_width=True)
+        elif len(final_list) > 1:
+            if st.button("🚀 导出 ZIP 压缩包", use_container_width=True):
+                zip_buf = io.BytesIO()
+                p_bar = st.progress(0, text="打包中...")
+                with zipfile.ZipFile(zip_buf, 'w') as zf:
+                    for idx, itm in enumerate(final_list):
+                        data, ext = process_engine(itm, conf)
+                        name_raw = getattr(itm, 'filename', getattr(itm, 'name', f"output_{idx}.jpg"))
+                        zf.writestr(f"{name_raw.rsplit('.', 1)[0]}.{ext.lower()}", data)
+                        p_bar.progress((idx+1)/len(final_list))
+                st.download_button("📦 下载 ZIP 包", zip_buf.getvalue(), f"Batch_{datetime.now().strftime('%H%M')}.zip", use_container_width=True)
 else:
     st.info("💡 请上传文件开始。")
