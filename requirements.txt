@@ -3,4 +3,3 @@ Pillow
 numpy
 opencv-python-headless
 pdf2image
-easyocr
