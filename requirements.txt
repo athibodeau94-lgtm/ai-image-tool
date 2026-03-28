@@ -2,5 +2,4 @@ streamlit
 Pillow
 numpy
 opencv-python-headless
-easyocr
 pdf2image
