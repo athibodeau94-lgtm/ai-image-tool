@@ -6,47 +6,30 @@ import numpy as np
 import cv2
 from datetime import datetime
 
-# --- 1. 环境与 OCR 延时加载 ---
+# --- 1. 环境兼容性检测 ---
 @st.cache_resource
-def get_ocr_reader():
+def load_ocr():
     try:
         import easyocr
         return easyocr.Reader(['ch_sim', 'en'], gpu=False)
-    except:
+    except Exception as e:
+        st.warning(f"OCR组件加载中或环境受限，抹除功能暂不可用。")
         return None
 
 try:
     from pdf2image import convert_from_bytes
-    PDF_READY = True
+    PDF_OK = True
 except:
-    PDF_READY = False
+    PDF_OK = False
 
-# --- 2. 页面配置 ---
-st.set_page_config(page_title="餐影工坊 1.1.3", layout="wide", page_icon="🍽️")
+READER = load_ocr()
 
-if 'up_key' not in st.session_state:
-    st.session_state.up_key = 0
-
-def reset_all():
-    st.session_state.up_key += 1
-    st.rerun()
-
-# 极致紧凑 UI 
-st.markdown("""
-    <style>
-    [data-testid="stSidebar"] [data-testid="stVerticalBlock"] { gap: 0.2rem !important; padding-top: 0rem !important; }
-    [data-testid="stSidebar"] * { font-size: 0.85rem !important; }
-    header {visibility: hidden;}
-    div[data-testid="stSidebar"] button:first-child { background-color: #ff4b4b !important; color: white !important; }
-    </style>
-    """, unsafe_allow_html=True)
-
-# --- 3. 核心工具函数 ---
-def erase_text_logic(pil_img, reader):
-    if reader is None: return pil_img
+# --- 2. 核心功能函数 ---
+def erase_text(pil_img):
+    if READER is None: return pil_img
     cv_img = cv2.cvtColor(np.array(pil_img.convert('RGB')), cv2.COLOR_RGB2BGR)
     try:
-        results = reader.readtext(cv_img)
+        results = READER.readtext(cv_img)
         if not results: return pil_img
         mask = np.zeros(cv_img.shape[:2], dtype="uint8")
         for (bbox, text, prob) in results:
@@ -72,24 +55,44 @@ def get_subjects(pil_img):
         res.append(Image.fromarray(cv2.cvtColor(img[y:y+h, x:x+w], cv2.COLOR_BGR2RGB)))
     return res if res else [pil_img]
 
-# --- 4. 处理引擎 ---
-def main_engine(item, cfg, is_pre=False):
-    # 加载图片
-    if hasattr(item, 'getvalue'):
-        img = Image.open(io.BytesIO(item.getvalue())).convert("RGBA")
-    else:
-        img = item.convert("RGBA")
+# --- 3. 页面配置与样式 ---
+st.set_page_config(page_title="餐影工坊 1.1.4", layout="wide")
+if 'key' not in st.session_state: st.session_state.key = 0
 
-    # 执行抹除 (仅在正式导出且开启时)
-    if cfg.get('erase') and not is_pre:
-        img = erase_text_logic(img, cfg.get('reader')).convert("RGBA")
+def clear_all():
+    st.session_state.key += 1
+    st.rerun()
 
-    # 缩放
-    tw, th = cfg['size']
-    rw, rh = (tw//2, th//2) if is_pre else (tw, th)
+st.markdown("<style>header {visibility: hidden;} [data-testid='stSidebar'] {min-width: 300px;}</style>", unsafe_allow_html=True)
+
+# --- 4. 侧边栏参数 ---
+with st.sidebar:
+    st.button("🗑️ 清空所有", on_click=clear_all, use_container_width=True)
+    res_sel = st.selectbox("导出分辨率", ["1920*1080", "1000*600", "800*800"])
+    tw, th = map(int, res_sel.split('*'))
+    
+    do_erase = st.toggle("智能抹除文字 (下载生效)", value=True)
+    do_crop = st.toggle("自动拆解主体", value=True)
+    
+    bg_mode = st.radio("背景填充", ["纯色", "模糊", "提取原色"])
+    c_sel = st.selectbox("颜色", ["白色", "黑色", "透明"]) if bg_mode == "纯色" else "白色"
+    c_map = {"白色":(255,255,255,255), "黑色":(0,0,0,255), "透明":(0,0,0,0)}
+    
+    br = st.slider("亮度", 0.5, 1.5, 1.05)
+    sh = st.slider("锐化", 1.0, 4.0, 1.8)
+
+# --- 5. 处理引擎 ---
+def engine(item, cfg, is_preview=False):
+    # 统一转为PIL
+    img = Image.open(io.BytesIO(item.getvalue())).convert("RGBA") if hasattr(item, 'getvalue') else item.convert("RGBA")
+    
+    # 仅下载时抹除
+    if cfg['erase'] and not is_preview:
+        img = erase_text(img).convert("RGBA")
+        
+    rw, rh = (tw//2, th//2) if is_preview else (tw, th)
     img.thumbnail((rw, rh), Image.Resampling.LANCZOS)
     
-    # 背景
     if cfg['bg'] == "模糊":
         canvas = img.convert("RGB").resize((rw, rh)).filter(ImageFilter.GaussianBlur(30)).convert("RGBA")
     elif cfg['bg'] == "纯色":
@@ -99,83 +102,60 @@ def main_engine(item, cfg, is_pre=False):
         canvas = Image.new("RGBA", (rw, rh), pix + (255,))
 
     canvas.paste(img, ((rw - img.size[0])//2, (rh - img.size[1])//2), img)
-    final = canvas.convert("RGB")
-    final = ImageEnhance.Brightness(final).enhance(cfg['br'])
-    final = ImageEnhance.Sharpness(final).enhance(cfg['sh'])
+    final = ImageEnhance.Sharpness(ImageEnhance.Brightness(canvas.convert("RGB")).enhance(cfg['br'])).enhance(cfg['sh'])
     
     buf = io.BytesIO()
-    ext = "PNG" if cfg.get('color') == (0,0,0,0) else "JPEG"
-    final.save(buf, format=ext, quality=85)
-    return buf.getvalue(), ext
+    fmt = "PNG" if cfg['color'] == (0,0,0,0) else "JPEG"
+    final.save(buf, format=fmt, quality=90)
+    return buf.getvalue(), fmt
 
-# --- 5. UI 逻辑 ---
-with st.sidebar:
-    st.button("🗑️ 清空重置", on_click=reset_all, use_container_width=True)
-    size_sel = st.selectbox("分辨率", ["1920*1080", "1000*600", "800*800"])
-    tw, th = map(int, size_sel.split('*'))
-    
-    ocr_on = st.toggle("智能抹除文字", value=True)
-    crop_on = st.toggle("自动拆解主体", value=True)
-    
-    st.markdown("---")
-    bg_sel = st.radio("背景模式", ["纯色", "模糊", "提取原色"])
-    c_sel = st.selectbox("背景色", ["白色", "黑色", "透明"]) if bg_sel == "纯色" else "白色"
-    c_map = {"白色":(255,255,255,255), "黑色":(0,0,0,255), "透明":(0,0,0,0)}
-    
-    br_val = st.slider("亮度调节", 0.5, 1.5, 1.05)
-    sh_val = st.slider("锐化调节", 1.0, 4.0, 1.8)
+# --- 6. 主逻辑 ---
+st.title("🍽️ 餐影工坊 1.1.4")
+files = st.file_uploader("素材上传", type=['jpg','png','pdf'], accept_multiple_files=True, key=f"u_{st.session_state.key}")
 
-st.title("🍽️ 餐影工坊 1.1.3")
-up_files = st.file_uploader("上传图片或 PDF", type=['jpg','png','pdf'], accept_multiple_files=True, key=f"up_{st.session_state.up_key}")
-
-if up_files:
-    final_list = []
-    reader_inst = get_ocr_reader() if ocr_on else None
+if files:
+    final_list = [] # 统一变量名，彻底解决AttributeError
     
-    with st.spinner("正在解析素材..."):
-        for f in up_files:
-            if f.name.lower().endswith('.pdf') and PDF_READY:
+    with st.spinner("解析中..."):
+        for f in files:
+            if f.name.lower().endswith('.pdf') and PDF_OK:
                 pages = convert_from_bytes(f.read(), dpi=150)
                 for i, p in enumerate(pages):
-                    if crop_on:
+                    if do_crop:
                         for idx, dish in enumerate(get_subjects(p)):
-                            dish.name = f"{f.name[:-4]}_P{i+1}_{idx+1}.jpg"
+                            dish.name = f"{f.name[:-4]}_P{i+1}_{idx+1}"
                             final_list.append(dish)
                     else:
-                        p.name = f"{f.name[:-4]}_P{i+1}.jpg"
+                        p.name = f"{f.name[:-4]}_P{i+1}"
                         final_list.append(p)
             else:
-                if crop_on:
+                if do_crop:
                     raw = Image.open(f)
                     for idx, dish in enumerate(get_subjects(raw)):
-                        dish.name = f"{f.name.split('.')[0]}_{idx+1}.jpg"
+                        dish.name = f"{f.name.split('.')[0]}_{idx+1}"
                         final_list.append(dish)
                 else:
                     final_list.append(f)
 
-    cfg = {'size':(tw, th), 'bg':bg_sel, 'color':c_map.get(c_sel), 'br':br_val, 'sh':sh_val, 'erase':ocr_on, 'reader':reader_inst}
+    cfg = {'size':(tw,th), 'bg':bg_mode, 'color':c_map.get(c_sel), 'br':br, 'sh':sh, 'erase':do_erase}
 
-    st.subheader(f"🖼️ 预览 ({len(final_list)} 张)")
-    with st.container(height=550, border=True):
+    st.subheader(f"预览 ({len(final_list)} 张)")
+    with st.container(height=500, border=True):
         cols = st.columns(3)
-        for i, item in enumerate(final_list):
+        for i, itm in enumerate(final_list):
             with cols[i % 3]:
-                p_data, _ = main_engine(item, cfg, is_pre=True)
-                st.image(p_data, use_container_width=True, caption=getattr(item, 'name', f"Image_{i+1}"))
+                p_data, _ = engine(itm, cfg, is_preview=True)
+                st.image(p_data, use_container_width=True, caption=getattr(itm, 'name', f"素材_{i+1}"))
 
     with st.sidebar:
         st.markdown("---")
-        if len(final_list) == 1:
-            data, ext = main_engine(final_list[0], cfg)
-            st.download_button("📥 下载图片", data, f"output.{ext.lower()}", use_container_width=True)
-        elif len(final_list) > 1:
+        if len(final_list) > 0:
             if st.button("🚀 导出 ZIP", use_container_width=True):
-                z_io = io.BytesIO()
-                with zipfile.ZipFile(z_io, 'w') as zf:
+                z_buf = io.BytesIO()
+                with zipfile.ZipFile(z_buf, 'w') as zf:
                     for i, itm in enumerate(final_list):
-                        d, e = main_engine(itm, cfg)
-                        nm = getattr(itm, 'name', f"{i+1}.jpg")
-                        zf.writestr(f"{nm.split('.')[0]}.{e.lower()}", d)
-                st.download_button("📦 点击下载 ZIP", z_io.getvalue(), "batch.zip", use_container_width=True)
+                        d, e = engine(itm, cfg)
+                        zf.writestr(f"{getattr(itm, 'name', str(i))}.{e.lower()}", d)
+                st.download_button("📦 点击下载", z_buf.getvalue(), "images.zip", use_container_width=True)
 else:
-    st.info("💡 请上传素材开始。")
+    st.info("💡 请上传图片或PDF。")
