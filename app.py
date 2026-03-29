@@ -111,29 +111,36 @@ with st.sidebar:
     st.header("⚙️ 参数设置")
     st.button("🗑️ 清空列表", on_click=reset_uploader)
     
+    # 更新后的预设列表
     res_map = {
-        "美团标准 (4:3)": "1600*1200",
-        "饿了么标准 (1:1)": "1000*1000",
+        "聚合标准 (1920*1080)": "1920*1080",
+        "Kiosk/Emenu标准 (5:3)": "1000*600",
+        "自定义": "custom",
+        "海报标准 (1:1)": "1200*1200",
         "小红书 (3:4)": "900*1200",
-        "高清 (16:9)": "1920*1080",
-        "自定义尺寸": "custom"
+        "高清 (16:9)": "1920*1080"
     }
-    res_label = st.selectbox("平台预设", list(res_map.keys()))
-    if res_label == "自定义尺寸":
-        tw = st.number_input("宽", 100, 4000, 1920)
-        th = st.number_input("高", 100, 4000, 1080)
+    res_labels = list(res_map.keys())
+    res_label = st.selectbox("平台预设", res_labels, index=0)
+    
+    if res_label == "自定义":
+        tw = st.number_input("自定义宽", 100, 4000, 1920)
+        th = st.number_input("自定义高", 100, 4000, 1080)
     else:
-        tw, th = map(int, res_map[res_label].split('*'))
+        preset_val = res_map[res_label]
+        tw, th = map(int, preset_val.split('*'))
     
     vol_opt = st.selectbox("体积控制", ["不限制", "500KB", "1MB"])
     kb = {"不限制": 0, "500KB": 500, "1MB": 1024}.get(vol_opt, 0)
     
+    st.divider()
     auto_crop = st.toggle("多主体拆分", value=True)
     bg_m = st.selectbox("背景样式", ["深度高斯模糊", "特定颜色", "提取原色"])
     p_color, b_radius = "白色", 40
     if bg_m == "特定颜色": p_color = st.selectbox("颜色", ["白色", "黑色", "灰色", "透明"])
     elif bg_m == "深度高斯模糊": b_radius = st.slider("模糊半径", 10, 100, 40)
     
+    st.divider()
     flt = st.selectbox("滤镜", ["原色", "暖色调", "清爽调"])
     br = st.slider("亮度", 0.5, 1.5, 1.05)
     sh = st.slider("锐化", 1.0, 4.0, 1.5)
@@ -177,7 +184,7 @@ if files:
             with cols[idx % 4]:
                 p_bytes, _ = process_engine(item, conf, is_preview=True)
                 if p_bytes:
-                    st.image(p_bytes, width="stretch") # 适配 2026 参数
+                    st.image(p_bytes, width="stretch")
 
     if len(final_list) > 0:
         if st.button("🚀 开始并行处理并下载 (ZIP)", type="primary"):
@@ -197,7 +204,7 @@ if files:
                 data=zip_buf.getvalue(),
                 file_name=f"Batch_{datetime.now().strftime('%H%M')}.zip",
                 mime="application/zip",
-                width="stretch" # 适配 2026 参数
+                width="stretch"
             )
 else:
     st.info("💡 请上传文件开始。")
