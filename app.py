@@ -105,7 +105,6 @@ with st.sidebar:
     st.header("⚙️ 参数设置")
     st.button("🗑️ 清空列表", on_click=reset_uploader)
     
-    # 分辨率预设
     res_map = {
         "聚合标准 (1920*1080)": "1920*1080",
         "Kiosk/Emenu标准 (5:3)": "1000*600",
@@ -121,7 +120,6 @@ with st.sidebar:
     else:
         tw, th = map(int, res_map[res_label].split('*'))
     
-    # 体积控制优化
     st.divider()
     vol_opt = st.selectbox("体积控制", ["不限制", "500KB", "1MB", "自定义"])
     kb = 0
@@ -179,7 +177,7 @@ if files:
     conf = {'size': (tw, th), 'limit_kb': kb, 'bg_mode': bg_m, 'pure_color': p_color, 
             'blur_radius': b_radius, 'filter': flt, 'bright': br, 'sharp': sh}
 
-    st.subheader(f"待处理列表 ({len(final_list)})")
+    st.subheader(f"预览区 ({len(final_list)} 张)")
     with st.container(height=500):
         cols = st.columns(4)
         for idx, item in enumerate(final_list):
@@ -188,7 +186,25 @@ if files:
                 if p_bytes:
                     st.image(p_bytes, width="stretch")
 
-    if len(final_list) > 0:
+    # --- 6. 动态导出逻辑 ---
+    st.divider()
+    if len(final_list) == 1:
+        # 单图处理：直接生成下载按钮
+        with st.spinner("准备下载..."):
+            data, ext = process_engine(final_list[0], conf)
+            if data:
+                orig_name = getattr(final_list[0], 'filename', getattr(final_list[0], 'name', "output.jpg"))
+                new_name = f"{orig_name.split('.')[0]}.{ext.lower()}"
+                st.download_button(
+                    label="📥 下载处理后的图片",
+                    data=data,
+                    file_name=new_name,
+                    mime=f"image/{ext.lower()}",
+                    type="primary",
+                    width="stretch"
+                )
+    elif len(final_list) > 1:
+        # 多图处理：保持 ZIP 逻辑
         if st.button("🚀 开始并行处理并下载 (ZIP)", type="primary"):
             zip_buf = io.BytesIO()
             with zipfile.ZipFile(zip_buf, 'w') as zf:
@@ -202,7 +218,7 @@ if files:
                             zf.writestr(f"{name.split('.')[0]}.{ext.lower()}", data)
             
             st.download_button(
-                label="📥 点击下载 ZIP 压缩包",
+                label="📥 下载 ZIP 压缩包",
                 data=zip_buf.getvalue(),
                 file_name=f"Batch_{datetime.now().strftime('%H%M')}.zip",
                 mime="application/zip",
