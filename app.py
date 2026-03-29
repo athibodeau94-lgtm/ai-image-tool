@@ -57,10 +57,8 @@ def smart_extract_multiple_subjects(pil_img):
         return extracted_images if extracted_images else [pil_img]
     except: return [pil_img]
 
-# --- 修复后的处理引擎 ---
 def process_engine(img_input, config, is_preview=False):
     try:
-        # 1. 统一加载为 RGBA 模式以支持透明
         if isinstance(img_input, (bytes, io.BytesIO)) or hasattr(img_input, 'getvalue'):
             img = Image.open(io.BytesIO(img_input.getvalue() if hasattr(img_input, 'getvalue') else img_input)).convert("RGBA")
         else:
@@ -70,7 +68,6 @@ def process_engine(img_input, config, is_preview=False):
         render_w, render_h = (tw // 2, th // 2) if is_preview else (tw, th)
         img.thumbnail((render_w, render_h), Image.Resampling.LANCZOS)
         
-        # 2. 生成底板
         is_transparent = (config['bg_mode'] == "特定颜色" and config['pure_color'] == "透明")
         
         if config['bg_mode'] == "深度高斯模糊":
@@ -82,26 +79,20 @@ def process_engine(img_input, config, is_preview=False):
             sample = img.convert("RGB").getpixel((img.size[0]//2, img.size[1]//2))
             bg = Image.new("RGBA", (render_w, render_h), sample + (255,))
         
-        # 3. 合成：如果是透明底，直接粘贴保留 Alpha 通道
         bg.alpha_composite(img, ((render_w - img.size[0]) // 2, (render_h - img.size[1]) // 2))
         
-        # 4. 调整增强（透明底时跳过转换 RGB，直接处理 RGBA）
         if is_transparent:
-            # 保持 RGBA 模式保存
             res = bg
         else:
-            # 非透明底转换为 RGB 进行亮度/锐化增强，以支持 JPEG 压缩
             res = bg.convert("RGB")
             res = ImageEnhance.Brightness(res).enhance(config['bright'])
             res = ImageEnhance.Sharpness(res).enhance(config['sharp'])
         
         out_io = io.BytesIO()
-        # 5. 核心修复：透明底必须保存为 PNG，否则会变黑
         if is_transparent:
             res.save(out_io, format="PNG")
             ext = "PNG"
         else:
-            # JPEG 压缩逻辑
             ext = "JPEG"
             q = 90 if is_preview else 95
             while q > 30:
@@ -148,7 +139,8 @@ with left_col:
         else: kb = {"不限制": 0, "500KB": 500, "1MB": 1024}.get(vol_opt, 0)
 
     with st.expander("🎨 视觉设置", expanded=False):
-        auto_crop = st.toggle("多主体识别拆分", value=True)
+        # 此处已改为默认关闭 (value=False)
+        auto_crop = st.toggle("多主体识别拆分", value=False)
         bg_m = st.selectbox("背景模式", ["深度高斯模糊", "特定颜色", "提取原色"])
         p_color = "白色"
         if bg_m == "特定颜色": p_color = st.selectbox("底色", ["白色", "黑色", "灰色", "透明"])
@@ -195,7 +187,7 @@ with right_col:
             data, ext = process_engine(final_list[0], conf)
             if data:
                 orig_name = getattr(final_list[0], 'filename', getattr(final_list[0], 'name', "output.jpg"))
-                st.download_button(label="📥 下载透明底图片", data=data, 
+                st.download_button(label="📥 下载处理后的图片", data=data, 
                                    file_name=f"{orig_name.split('.')[0]}.{ext.lower()}", 
                                    mime=f"image/{ext.lower()}", type="primary", use_container_width=True)
         elif len(final_list) > 1:
