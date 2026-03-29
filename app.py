@@ -24,7 +24,7 @@ def reset_uploader():
     st.session_state.upload_key += 1
     st.rerun()
 
-# 界面样式优化 - 适配 2026 视觉规范
+# 界面样式优化
 st.markdown("""
     <style>
     [data-testid="stSidebar"] [data-testid="stVerticalBlock"] { gap: 0.5rem !important; }
@@ -35,7 +35,6 @@ st.markdown("""
 
 # --- 2. 核心算法 ---
 def smart_extract_multiple_subjects(pil_img):
-    """利用OpenCV识别并拆分多个主体"""
     try:
         open_cv_image = np.array(pil_img.convert('RGB'))
         img = cv2.cvtColor(open_cv_image, cv2.COLOR_RGB2BGR)
@@ -61,7 +60,6 @@ def smart_extract_multiple_subjects(pil_img):
 
 # --- 3. 处理引擎 ---
 def process_engine(img_input, config, is_preview=False):
-    """图像处理逻辑，支持内存缓冲"""
     try:
         if isinstance(img_input, (bytes, io.BytesIO)) or hasattr(img_input, 'getvalue'):
             img = Image.open(io.BytesIO(img_input.getvalue() if hasattr(img_input, 'getvalue') else img_input)).convert("RGBA")
@@ -86,19 +84,15 @@ def process_engine(img_input, config, is_preview=False):
         res = ImageEnhance.Brightness(res).enhance(config['bright'])
         res = ImageEnhance.Sharpness(res).enhance(config['sharp'])
         
-        if config['filter'] == "暖色调":
-            r, g, b = res.split(); r = ImageEnhance.Brightness(r).enhance(1.1); res = Image.merge("RGB", (r, g, b))
-        elif config['filter'] == "清爽调":
-            r, g, b = res.split(); b = ImageEnhance.Brightness(b).enhance(1.1); res = Image.merge("RGB", (r, g, b))
-        
         out_io = io.BytesIO()
         ext = "PNG" if config.get('pure_color') == "透明" else "JPEG"
         if ext == "JPEG":
             q = 90 if is_preview else 95
+            limit_kb = config['limit_kb']
             while q > 30:
                 out_io = io.BytesIO()
                 res.save(out_io, format="JPEG", quality=q, optimize=True)
-                if out_io.tell() <= config['limit_kb'] * 1024 or is_preview or config['limit_kb'] == 0: break
+                if out_io.tell() <= limit_kb * 1024 or is_preview or limit_kb == 0: break
                 q -= 5
         else:
             res.save(out_io, format="PNG")
@@ -111,7 +105,7 @@ with st.sidebar:
     st.header("⚙️ 参数设置")
     st.button("🗑️ 清空列表", on_click=reset_uploader)
     
-    # 更新后的预设列表
+    # 分辨率预设
     res_map = {
         "聚合标准 (1920*1080)": "1920*1080",
         "Kiosk/Emenu标准 (5:3)": "1000*600",
@@ -120,18 +114,26 @@ with st.sidebar:
         "小红书 (3:4)": "900*1200",
         "高清 (16:9)": "1920*1080"
     }
-    res_labels = list(res_map.keys())
-    res_label = st.selectbox("平台预设", res_labels, index=0)
-    
+    res_label = st.selectbox("平台预设", list(res_map.keys()), index=0)
     if res_label == "自定义":
-        tw = st.number_input("自定义宽", 100, 4000, 1920)
-        th = st.number_input("自定义高", 100, 4000, 1080)
+        tw = st.number_input("宽", 100, 4000, 1920)
+        th = st.number_input("高", 100, 4000, 1080)
     else:
-        preset_val = res_map[res_label]
-        tw, th = map(int, preset_val.split('*'))
+        tw, th = map(int, res_map[res_label].split('*'))
     
-    vol_opt = st.selectbox("体积控制", ["不限制", "500KB", "1MB"])
-    kb = {"不限制": 0, "500KB": 500, "1MB": 1024}.get(vol_opt, 0)
+    # 体积控制优化
+    st.divider()
+    vol_opt = st.selectbox("体积控制", ["不限制", "500KB", "1MB", "自定义"])
+    kb = 0
+    if vol_opt == "自定义":
+        c1, c2 = st.columns([2, 1])
+        with c1:
+            val = st.number_input("数值", 1, 10240, 500)
+        with c2:
+            unit = st.selectbox("单位", ["KB", "MB"])
+        kb = val if unit == "KB" else val * 1024
+    else:
+        kb = {"不限制": 0, "500KB": 500, "1MB": 1024}.get(vol_opt, 0)
     
     st.divider()
     auto_crop = st.toggle("多主体拆分", value=True)
