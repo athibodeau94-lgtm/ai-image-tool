@@ -27,15 +27,10 @@ def reset_uploader():
 # --- 2. 注入 CSS：实现单屏锁定与UI美化 ---
 st.markdown("""
     <style>
-    /* 隐藏顶部导航 */
     header {visibility: hidden;}
-    /* 移除侧边栏空白 */
     [data-testid="stSidebar"] {display: none;}
-    /* 调整主容器内边距 */
     .block-container {padding-top: 2rem !important; padding-bottom: 0rem !important;}
-    /* 预览图片容器样式 */
     .stImage { border-radius: 4px; border: 1px solid #eee; margin-bottom: 10px; }
-    /* 卡片式分组 */
     div.stExpander { border: none !important; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
     </style>
     """, unsafe_allow_html=True)
@@ -62,15 +57,22 @@ def smart_extract_multiple_subjects(pil_img):
         return extracted_images if extracted_images else [pil_img]
     except: return [pil_img]
 
+# --- 修复后的处理引擎 ---
 def process_engine(img_input, config, is_preview=False):
     try:
+        # 1. 统一加载为 RGBA 模式以支持透明
         if isinstance(img_input, (bytes, io.BytesIO)) or hasattr(img_input, 'getvalue'):
             img = Image.open(io.BytesIO(img_input.getvalue() if hasattr(img_input, 'getvalue') else img_input)).convert("RGBA")
         else:
             img = img_input.convert("RGBA")
+            
         tw, th = config['size']
         render_w, render_h = (tw // 2, th // 2) if is_preview else (tw, th)
         img.thumbnail((render_w, render_h), Image.Resampling.LANCZOS)
+        
+        # 2. 生成底板
+        is_transparent = (config['bg_mode'] == "特定颜色" and config['pure_color'] == "透明")
+        
         if config['bg_mode'] == "深度高斯模糊":
             bg = img.convert("RGB").resize((render_w, render_h)).filter(ImageFilter.GaussianBlur(config['blur_radius'])).convert("RGBA")
         elif config['bg_mode'] == "特定颜色":
@@ -79,27 +81,40 @@ def process_engine(img_input, config, is_preview=False):
         else:
             sample = img.convert("RGB").getpixel((img.size[0]//2, img.size[1]//2))
             bg = Image.new("RGBA", (render_w, render_h), sample + (255,))
-        bg.paste(img, ((render_w - img.size[0]) // 2, (render_h - img.size[1]) // 2), img)
-        res = bg.convert("RGB")
-        res = ImageEnhance.Brightness(res).enhance(config['bright'])
-        res = ImageEnhance.Sharpness(res).enhance(config['sharp'])
+        
+        # 3. 合成：如果是透明底，直接粘贴保留 Alpha 通道
+        bg.alpha_composite(img, ((render_w - img.size[0]) // 2, (render_h - img.size[1]) // 2))
+        
+        # 4. 调整增强（透明底时跳过转换 RGB，直接处理 RGBA）
+        if is_transparent:
+            # 保持 RGBA 模式保存
+            res = bg
+        else:
+            # 非透明底转换为 RGB 进行亮度/锐化增强，以支持 JPEG 压缩
+            res = bg.convert("RGB")
+            res = ImageEnhance.Brightness(res).enhance(config['bright'])
+            res = ImageEnhance.Sharpness(res).enhance(config['sharp'])
+        
         out_io = io.BytesIO()
-        ext = "PNG" if config.get('pure_color') == "透明" else "JPEG"
-        if ext == "JPEG":
+        # 5. 核心修复：透明底必须保存为 PNG，否则会变黑
+        if is_transparent:
+            res.save(out_io, format="PNG")
+            ext = "PNG"
+        else:
+            # JPEG 压缩逻辑
+            ext = "JPEG"
             q = 90 if is_preview else 95
             while q > 30:
                 out_io = io.BytesIO()
                 res.save(out_io, format="JPEG", quality=q, optimize=True)
                 if out_io.tell() <= config['limit_kb'] * 1024 or is_preview or config['limit_kb'] == 0: break
                 q -= 5
-        else: res.save(out_io, format="PNG")
         return out_io.getvalue(), ext
-    except: return None, "err"
+    except Exception as e:
+        return None, f"err: {str(e)}"
 
-# --- 4. 界面重构：双栏布局 ---
+# --- 4. 界面重构 ---
 st.title("🍽️ 餐影工坊 2.0 Pro")
-
-# 定义主列：左侧操作，右侧预览
 left_col, right_col = st.columns([1.1, 2.5], gap="large")
 
 with left_col:
@@ -113,7 +128,8 @@ with left_col:
             "Kiosk/Emenu标准 (5:3)": "1000*600",
             "自定义": "custom",
             "海报标准 (1:1)": "1200*1200",
-            "小红书 (3:4)": "900*1200"
+            "小红书 (3:4)": "900*1200",
+            "高清 (16:9)": "1920*1080"
         }
         res_label = st.selectbox("比例预设", list(res_map.keys()))
         if res_label == "自定义":
@@ -140,12 +156,10 @@ with left_col:
         br = st.slider("亮度", 0.5, 1.5, 1.05)
         sh = st.slider("锐化", 1.0, 4.0, 1.5)
     
-    if st.button("🗑️ 清空所有数据", width="stretch"): reset_uploader()
+    if st.button("🗑️ 清空所有数据", use_container_width=True): reset_uploader()
 
-# --- 5. 右侧预览逻辑 ---
 with right_col:
     st.subheader("🔍 实时预览区")
-    
     if files:
         final_list = []
         with st.spinner("处理中..."):
@@ -167,9 +181,8 @@ with right_col:
                 except: continue
 
         conf = {'size': (tw, th), 'limit_kb': kb, 'bg_mode': bg_m, 'pure_color': p_color, 
-                'blur_radius': b_radius, 'filter': "原色", 'bright': br, 'sharp': sh}
+                'blur_radius': b_radius, 'bright': br, 'sharp': sh}
 
-        # 固定高度的预览容器
         with st.container(height=520):
             cols = st.columns(3)
             for idx, item in enumerate(final_list):
@@ -177,17 +190,16 @@ with right_col:
                     p_bytes, _ = process_engine(item, conf, is_preview=True)
                     if p_bytes: st.image(p_bytes, width="stretch")
 
-        # 底部动态下载按钮区
         st.write("---")
         if len(final_list) == 1:
             data, ext = process_engine(final_list[0], conf)
             if data:
                 orig_name = getattr(final_list[0], 'filename', getattr(final_list[0], 'name', "output.jpg"))
-                st.download_button(label="📥 下载处理后的图片", data=data, 
+                st.download_button(label="📥 下载透明底图片", data=data, 
                                    file_name=f"{orig_name.split('.')[0]}.{ext.lower()}", 
-                                   mime=f"image/{ext.lower()}", type="primary", width="stretch")
+                                   mime=f"image/{ext.lower()}", type="primary", use_container_width=True)
         elif len(final_list) > 1:
-            if st.button("🚀 准备批量下载 (打包 ZIP)", type="primary", width="stretch"):
+            if st.button("🚀 准备批量下载 (打包 ZIP)", type="primary", use_container_width=True):
                 zip_buf = io.BytesIO()
                 with zipfile.ZipFile(zip_buf, 'w') as zf:
                     with ThreadPoolExecutor() as executor:
@@ -200,8 +212,6 @@ with right_col:
                                 zf.writestr(f"{name.split('.')[0]}.{ext.lower()}", data)
                 st.download_button(label="📥 点击获取 ZIP 压缩包", data=zip_buf.getvalue(), 
                                    file_name=f"Batch_{datetime.now().strftime('%H%M')}.zip", 
-                                   mime="application/zip", width="stretch")
+                                   mime="application/zip", use_container_width=True)
     else:
-        # 未上传时的占位
         st.info("上传文件后，预览和下载按钮将在此处显示。")
-        st.image("https://via.placeholder.com/800x400?text=Waiting+for+Upload...", width="stretch")
