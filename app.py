@@ -24,7 +24,7 @@ def reset_uploader():
     st.session_state.upload_key += 1
     st.rerun()
 
-# --- 2. 注入 CSS：实现单屏锁定与UI美化 ---
+# --- 2. 注入 CSS ---
 st.markdown("""
     <style>
     header {visibility: hidden;}
@@ -70,6 +70,7 @@ def process_engine(img_input, config, is_preview=False):
         
         is_transparent = (config['bg_mode'] == "特定颜色" and config['pure_color'] == "透明")
         
+        # 背景生成
         if config['bg_mode'] == "深度高斯模糊":
             bg = img.convert("RGB").resize((render_w, render_h)).filter(ImageFilter.GaussianBlur(config['blur_radius'])).convert("RGBA")
         elif config['bg_mode'] == "特定颜色":
@@ -79,32 +80,45 @@ def process_engine(img_input, config, is_preview=False):
             sample = img.convert("RGB").getpixel((img.size[0]//2, img.size[1]//2))
             bg = Image.new("RGBA", (render_w, render_h), sample + (255,))
         
+        # 合成
         bg.alpha_composite(img, ((render_w - img.size[0]) // 2, (render_h - img.size[1]) // 2))
-        
-        if is_transparent:
-            res = bg
-        else:
-            res = bg.convert("RGB")
+        res = bg
+
+        # 滤镜逻辑 (兼容 RGBA)
+        if config['filter'] != "原色":
+            r, g, b, a = res.split()
+            if config['filter'] == "暖色调":
+                r = ImageEnhance.Brightness(r).enhance(1.1)
+            elif config['filter'] == "清爽调":
+                b = ImageEnhance.Brightness(b).enhance(1.1)
+            res = Image.merge("RGBA", (r, g, b, a))
+
+        # 亮度与锐化
+        if not is_transparent:
+            alpha = res.getchannel('A')
+            res = res.convert("RGB")
             res = ImageEnhance.Brightness(res).enhance(config['bright'])
             res = ImageEnhance.Sharpness(res).enhance(config['sharp'])
+            res.putalpha(alpha) # 重新贴回 Alpha
         
         out_io = io.BytesIO()
         if is_transparent:
             res.save(out_io, format="PNG")
             ext = "PNG"
         else:
+            res_rgb = res.convert("RGB")
             ext = "JPEG"
             q = 90 if is_preview else 95
             while q > 30:
                 out_io = io.BytesIO()
-                res.save(out_io, format="JPEG", quality=q, optimize=True)
+                res_rgb.save(out_io, format="JPEG", quality=q, optimize=True)
                 if out_io.tell() <= config['limit_kb'] * 1024 or is_preview or config['limit_kb'] == 0: break
                 q -= 5
         return out_io.getvalue(), ext
     except Exception as e:
         return None, f"err: {str(e)}"
 
-# --- 4. 界面重构 ---
+# --- 4. 界面布局 ---
 st.title("🍽️ 餐影工坊 2.0 Pro")
 left_col, right_col = st.columns([1.1, 2.5], gap="large")
 
@@ -119,8 +133,7 @@ with left_col:
             "Kiosk/Emenu标准 (5:3)": "1000*600",
             "自定义": "custom",
             "海报标准 (1:1)": "1200*1200",
-            "小红书 (3:4)": "900*1200",
-            "高清 (16:9)": "1920*1080"
+            "小红书 (3:4)": "900*1200"
         }
         res_label = st.selectbox("比例预设", list(res_map.keys()))
         if res_label == "自定义":
@@ -139,12 +152,14 @@ with left_col:
         else: kb = {"不限制": 0, "500KB": 500, "1MB": 1024}.get(vol_opt, 0)
 
     with st.expander("🎨 视觉设置", expanded=False):
-        # 此处已改为默认关闭 (value=False)
         auto_crop = st.toggle("多主体识别拆分", value=False)
         bg_m = st.selectbox("背景模式", ["深度高斯模糊", "特定颜色", "提取原色"])
         p_color = "白色"
         if bg_m == "特定颜色": p_color = st.selectbox("底色", ["白色", "黑色", "灰色", "透明"])
         b_radius = st.slider("模糊强度", 10, 100, 40) if bg_m == "深度高斯模糊" else 40
+        
+        # 滤镜功能回归
+        flt = st.selectbox("滤镜效果", ["原色", "暖色调", "清爽调"])
         br = st.slider("亮度", 0.5, 1.5, 1.05)
         sh = st.slider("锐化", 1.0, 4.0, 1.5)
     
@@ -157,23 +172,15 @@ with right_col:
         with st.spinner("处理中..."):
             for f in files:
                 try:
-                    if f.name.lower().endswith('.pdf') and PDF_SUPPORT:
-                        pages = convert_from_bytes(f.read(), dpi=120)
-                        for i, p in enumerate(pages):
-                            if auto_crop:
-                                for idx, dish in enumerate(smart_extract_multiple_subjects(p)):
-                                    dish.filename = f"{f.name}_P{i+1}_{idx+1}.jpg"; final_list.append(dish)
-                            else: p.filename = f"{f.name}_P{i+1}.jpg"; final_list.append(p)
-                    else:
-                        img_obj = Image.open(f)
-                        if auto_crop:
-                            for idx, dish in enumerate(smart_extract_multiple_subjects(img_obj)):
-                                dish.filename = f"{f.name.split('.')[0]}_{idx+1}.jpg"; final_list.append(dish)
-                        else: final_list.append(f)
+                    img_obj = Image.open(f)
+                    if auto_crop:
+                        for idx, dish in enumerate(smart_extract_multiple_subjects(img_obj)):
+                            dish.filename = f"{f.name.split('.')[0]}_{idx+1}.jpg"; final_list.append(dish)
+                    else: final_list.append(f)
                 except: continue
 
         conf = {'size': (tw, th), 'limit_kb': kb, 'bg_mode': bg_m, 'pure_color': p_color, 
-                'blur_radius': b_radius, 'bright': br, 'sharp': sh}
+                'blur_radius': b_radius, 'filter': flt, 'bright': br, 'sharp': sh}
 
         with st.container(height=520):
             cols = st.columns(3)
