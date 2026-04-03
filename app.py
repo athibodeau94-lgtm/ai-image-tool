@@ -35,7 +35,7 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- 3. 核心引擎：修复缩放逻辑与文件名处理 ---
+# --- 3. 核心引擎 ---
 def process_engine(img_input, config, is_preview=False):
     try:
         # 加载图片
@@ -46,17 +46,14 @@ def process_engine(img_input, config, is_preview=False):
             
         target_w, target_h = config['size']
         if is_preview:
-            # 预览时按比例缩小以提升速度
             target_w, target_h = target_w // 2, target_h // 2
 
-        # 问题 3 修复：缩放模式逻辑
-        if config.get('scale_mode') == "居中裁剪铺满":
-            # 像图1一样铺满整个画布，多余部分裁掉
+        # 缩放模式逻辑
+        if config.get('scale_mode') == "居中裁剪铺满 (大图感)":
             res_img = ImageOps.fit(img, (target_w, target_h), Image.Resampling.LANCZOS)
         else:
-            # 等比缩放（留白/背景）
+            # 默认：等比完整展示 (留背景)
             img.thumbnail((target_w, target_h), Image.Resampling.LANCZOS)
-            # 生成背景底板
             if config['bg_mode'] == "深度高斯模糊":
                 bg = img.convert("RGB").resize((target_w, target_h)).filter(ImageFilter.GaussianBlur(config['blur_radius'])).convert("RGBA")
             elif config['bg_mode'] == "特定颜色":
@@ -65,11 +62,10 @@ def process_engine(img_input, config, is_preview=False):
             else:
                 sample = img.convert("RGB").getpixel((img.size[0]//2, img.size[1]//2))
                 bg = Image.new("RGBA", (target_w, target_h), sample + (255,))
-            # 居中合成
             bg.alpha_composite(img, ((target_w - img.size[0]) // 2, (target_h - img.size[1]) // 2))
             res_img = bg
 
-        # 增强处理
+        # 滤镜与增强
         if config['filter'] != "原色":
             r, g, b, a = res_img.split()
             if config['filter'] == "暖色调": r = ImageEnhance.Brightness(r).enhance(1.1)
@@ -86,7 +82,6 @@ def process_engine(img_input, config, is_preview=False):
             final_rgb = res_img.convert("RGB")
             final_rgb = ImageEnhance.Brightness(final_rgb).enhance(config['bright'])
             final_rgb = ImageEnhance.Sharpness(final_rgb).enhance(config['sharp'])
-            # 质量压缩
             q = 90 if is_preview else 95
             while q > 30:
                 out_io = io.BytesIO()
@@ -106,14 +101,32 @@ with left_col:
     files = st.file_uploader("支持多图/PDF", type=['jpg','jpeg','png','pdf'], accept_multiple_files=True, key=f"up_{st.session_state.upload_key}")
     
     with st.expander("🛠️ 规格设置", expanded=True):
-        # 问题 3 修复：新增缩放模式开关
-        scale_mode = st.radio("画面填充模式", ["居中裁剪铺满 (大图感)", "等比完整展示 (留背景)"], index=0)
-        res_map = {"美团标准 (4:3)": "1200*900", "饿了么标准 (1:1)": "800*800", "小红书 (3:4)": "900*1200", "自定义": "custom"}
-        res_label = st.selectbox("平台预设", list(res_map.keys()))
-        tw, th = (st.number_input("宽", 100, 4000, 1200), st.number_input("高", 100, 4000, 900)) if res_label == "自定义" else map(int, res_map[res_label].split('*'))
+        # 恢复之前的规格设置逻辑
+        res_map = {
+            "聚合标准 (1920*1080)": "1920*1080",
+            "Kiosk/Emenu标准 (5:3)": "1000*600",
+            "自定义": "custom",
+            "海报标准 (1:1)": "1200*1200",
+            "小红书 (3:4)": "900*1200"
+        }
+        res_label = st.selectbox("比例预设", list(res_map.keys()))
+        if res_label == "自定义":
+            tw = st.number_input("宽", 100, 4000, 1920)
+            th = st.number_input("高", 100, 4000, 1080)
+        else:
+            tw, th = map(int, res_map[res_label].split('*'))
         
-        vol_opt = st.selectbox("体积控制", ["不限制", "500KB", "1MB"])
-        kb = {"不限制": 0, "500KB": 500, "1MB": 1024}.get(vol_opt, 0)
+        vol_opt = st.selectbox("体积控制", ["不限制", "500KB", "1MB", "自定义"])
+        kb = 0
+        if vol_opt == "自定义":
+            c1, c2 = st.columns([2, 1])
+            with c1: val = st.number_input("数值", 1, 10240, 500)
+            with c2: unit = st.selectbox("单位", ["KB", "MB"])
+            kb = val if unit == "KB" else val * 1024
+        else: kb = {"不限制": 0, "500KB": 500, "1MB": 1024}.get(vol_opt, 0)
+
+        # 画面填充模式修改：默认设为等比展示
+        scale_mode = st.radio("画面填充模式", ["等比完整展示 (留背景)", "居中裁剪铺满 (大图感)"], index=0)
 
     with st.expander("🎨 视觉设置", expanded=False):
         auto_crop = st.toggle("多主体识别拆分", value=False)
@@ -130,7 +143,7 @@ with right_col:
     if files:
         conf = {'size': (tw, th), 'limit_kb': kb, 'bg_mode': bg_m, 'pure_color': p_color, 
                 'blur_radius': b_radius, 'filter': flt, 'bright': br, 'sharp': sh, 
-                'scale_mode': scale_mode.split(" ")[0]} # 提取关键字
+                'scale_mode': scale_mode}
 
         with st.container(height=500):
             cols = st.columns(3)
@@ -140,27 +153,19 @@ with right_col:
                     if p_bytes: st.image(p_bytes, use_container_width=True)
 
         st.write("---")
-        # 问题 1, 2, 4 修复：带进度条的打包逻辑
         if st.button(f"🚀 开始打包下载 ({len(files)}张)", type="primary", use_container_width=True):
             zip_buf = io.BytesIO()
             success_count = 0
-            
             with st.status("正在准备压缩包...", expanded=True) as status:
                 with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
                     for i, f in enumerate(files):
-                        status.write(f"正在处理第 {i+1}/{len(files)} 张: {f.name}")
+                        status.write(f"正在处理: {f.name}")
                         data, ext = process_engine(f, conf)
                         if data:
-                            # 问题 2 修复：使用 os.path.splitext 保留完整长菜名
                             base_name = os.path.splitext(f.name)[0]
                             zf.writestr(f"{base_name}.{ext.lower()}", data)
                             success_count += 1
-                
-                # 问题 1 校验：确保数量一致
-                if success_count == len(files):
-                    status.update(label="✅ 全部处理完成！", state="complete")
-                else:
-                    status.update(label=f"⚠️ 处理完成，但有 {len(files)-success_count} 张失败", state="error")
+                status.update(label=f"✅ 处理完成！(成功:{success_count}/{len(files)})", state="complete")
             
             if success_count > 0:
                 st.download_button(label="📥 点击获取 ZIP 压缩包", data=zip_buf.getvalue(), 
