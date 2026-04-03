@@ -6,11 +6,13 @@ import os
 from datetime import datetime
 
 # --- 1. 页面配置 ---
-st.set_page_config(page_title="餐影工坊 2.0 Pro", layout="wide", page_icon="🍽️")
+st.set_title_config = st.set_page_config(page_title="餐影工坊 2.0 Pro", layout="wide", page_icon="🍽️")
 
+# 初始化上传状态索引
 if 'upload_key' not in st.session_state:
     st.session_state.upload_key = 0
 
+# 清空逻辑：通过改变 file_uploader 的 key 来强制重置
 def reset_uploader():
     st.session_state.upload_key += 1
     st.rerun()
@@ -20,12 +22,11 @@ st.markdown("""
     <style>
     header {visibility: hidden;}
     .block-container {padding-top: 2rem !important;}
-    /* 强制预览容器背景与下载背景一致，消除视觉差 */
-    .stImage > img { object-fit: contain; background-color: transparent; }
+    .stImage > img { object-fit: contain; }
     </style>
     """, unsafe_allow_html=True)
 
-# --- 3. 核心引擎：修复铺满逻辑与文件名 ---
+# --- 3. 核心引擎 ---
 def process_engine(img_input, config, is_preview=False):
     try:
         if isinstance(img_input, (bytes, io.BytesIO)) or hasattr(img_input, 'getvalue'):
@@ -38,16 +39,14 @@ def process_engine(img_input, config, is_preview=False):
         if config.get('scale_mode') == "居中裁剪铺满 (大图感)":
             res_img = ImageOps.fit(img, (target_w, target_h), Image.Resampling.LANCZOS)
         else:
-            # --- 修复：等比完整展示 (留背景) 的“缩水”感 ---
+            # 修复后的等比铺满逻辑
             original_w, original_h = img.size
-            # 计算缩放比例，不留任何 0.98 的余量，直接 100% 贴边
             ratio = min(target_w / original_w, target_h / original_h)
             new_size = (int(original_w * ratio), int(original_h * ratio))
             img = img.resize(new_size, Image.Resampling.LANCZOS)
             
-            # 生成底板
+            # 背景生成
             if config['bg_mode'] == "深度高斯模糊":
-                # 使用原图模糊铺满底板
                 bg = img.convert("RGB").resize((target_w, target_h)).filter(ImageFilter.GaussianBlur(config['blur_radius'])).convert("RGBA")
             elif config['bg_mode'] == "特定颜色":
                 color_map = {"白色": (255,255,255,255), "黑色": (0,0,0,255), "灰色": (200,200,200,255), "透明": (0,0,0,0)}
@@ -56,11 +55,10 @@ def process_engine(img_input, config, is_preview=False):
                 sample = img.convert("RGB").getpixel((img.size[0]//2, img.size[1]//2))
                 bg = Image.new("RGBA", (target_w, target_h), sample + (255,))
             
-            # 居中合成，确保长边贴边
             bg.alpha_composite(img, ((target_w - img.size[0]) // 2, (target_h - img.size[1]) // 2))
             res_img = bg
 
-        # 增强处理
+        # 图像增强
         res_img = ImageEnhance.Brightness(res_img).enhance(config['bright'])
         res_img = ImageEnhance.Sharpness(res_img).enhance(config['sharp'])
 
@@ -70,18 +68,17 @@ def process_engine(img_input, config, is_preview=False):
             return out_io.getvalue(), "PNG"
         else:
             final_rgb = res_img.convert("RGB")
-            # 导出时保持高画质，不压缩导致模糊
             final_rgb.save(out_io, format="JPEG", quality=95, optimize=True)
             return out_io.getvalue(), "JPEG"
     except:
         return None, "Error"
 
 # --- 4. 界面布局 ---
-st.title("🍽️ 餐影工坊 2.0 Pro")
 left_col, right_col = st.columns([1.1, 2.5], gap="large")
 
 with left_col:
     st.subheader("📁 导入与设置")
+    # 使用动态 key 绑定上传器
     files = st.file_uploader("支持多图/PDF", type=['jpg','jpeg','png','pdf'], accept_multiple_files=True, key=f"up_{st.session_state.upload_key}")
     
     with st.expander("🛠️ 规格设置", expanded=True):
@@ -94,22 +91,20 @@ with left_col:
             tw, th = map(int, res_map[res_label].split('*'))
         
         vol_opt = st.selectbox("体积控制", ["不限制", "500KB", "1MB", "自定义"])
-        kb = 0
-        if vol_opt == "自定义":
-            c1, c2 = st.columns([2, 1])
-            with c1: val = st.number_input("数值", 1, 10240, 500)
-            with c2: unit = st.selectbox("单位", ["KB", "MB"])
-            kb = val if unit == "KB" else val * 1024
-        else: kb = {"不限制": 0, "500KB": 500, "1MB": 1024}.get(vol_opt, 0)
-
+        kb = {"不限制": 0, "500KB": 500, "1MB": 1024}.get(vol_opt, 0)
         scale_mode = st.radio("画面填充模式", ["等比完整展示 (留背景)", "居中裁剪铺满 (大图感)"], index=0)
 
     with st.expander("🎨 视觉设置", expanded=False):
-        bg_m = st.selectbox("背景模式", ["深度高斯模糊", "特定颜色", "提取原色"], index=0)
-        p_color = st.selectbox("底色", ["白色", "黑色", "灰色", "透明"]) if bg_m == "特定颜色" else "白色"
+        bg_m = st.selectbox("背景模式", ["深度高斯模糊", "特定颜色", "提取原色"])
+        p_color = st.selectbox("底色", ["白色", "黑色", "灰色", "透明"])
         b_radius = st.slider("模糊强度", 10, 100, 40)
         flt = st.selectbox("滤镜效果", ["原色", "暖色调", "清爽调"])
         br, sh = st.slider("亮度", 0.5, 1.5, 1.0), st.slider("锐化", 1.0, 4.0, 1.5)
+
+    # 【修复】找回一键清空功能
+    st.write("---")
+    if st.button("🗑️ 一键清空列表", use_container_width=True):
+        reset_uploader()
 
 with right_col:
     st.subheader("🔍 实时预览区")
@@ -124,13 +119,11 @@ with right_col:
                     if p_bytes: st.image(p_bytes, use_container_width=True, caption=f.name)
 
         st.write("---")
-        # --- 修复：文件名保留逻辑 ---
         if len(files) == 1:
             data, ext = process_engine(files[0], conf)
             if data:
-                # 获取原始名
                 orig_name = os.path.splitext(files[0].name)[0]
-                st.download_button(f"📥 下载: {files[0].name}", data=data, file_name=f"{orig_name}.{ext.lower()}", mime=f"image/{ext.lower()}", type="primary", use_container_width=True)
+                st.download_button(f"📥 下载: {files[0].name}", data=data, file_name=f"{orig_name}.{ext.lower()}", type="primary", use_container_width=True)
         else:
             if st.button(f"🚀 开始打包下载 ({len(files)}张)", type="primary", use_container_width=True):
                 zip_buf = io.BytesIO()
@@ -139,7 +132,6 @@ with right_col:
                         for i, f in enumerate(files):
                             data, ext = process_engine(f, conf)
                             if data:
-                                # 修复：使用原始文件名写入 ZIP
                                 orig_name = os.path.splitext(f.name)[0]
                                 zf.writestr(f"{orig_name}.{ext.lower()}", data)
                     status.update(label="✅ 处理完成！", state="complete")
