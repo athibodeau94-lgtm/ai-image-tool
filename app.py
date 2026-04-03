@@ -35,10 +35,10 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- 3. 核心引擎 ---
+# --- 3. 核心处理引擎 ---
 def process_engine(img_input, config, is_preview=False):
     try:
-        # 加载图片
+        # 1. 统一加载图片
         if isinstance(img_input, (bytes, io.BytesIO)) or hasattr(img_input, 'getvalue'):
             img = Image.open(io.BytesIO(img_input.getvalue() if hasattr(img_input, 'getvalue') else img_input)).convert("RGBA")
         else:
@@ -46,14 +46,19 @@ def process_engine(img_input, config, is_preview=False):
             
         target_w, target_h = config['size']
         if is_preview:
+            # 预览时按比例缩小以提升界面性能，但不改变缩放逻辑
             target_w, target_h = target_w // 2, target_h // 2
 
-        # 缩放模式逻辑
-        if config.get('scale_mode') == "居中裁剪铺满 (大图感)":
+        # 2. 核心修复：处理缩放模式
+        if config.get('scale_mode') == "居中裁剪铺满 (大图感，推荐)":
+            # 【重要】完全移除 thumbnail。直接使用 fit 方法，强行铺满画布
             res_img = ImageOps.fit(img, (target_w, target_h), Image.Resampling.LANCZOS)
         else:
-            # 默认：等比完整展示 (留背景)
+            # 等比完整展示 (留背景) 
+            # 只有在此模式下才允许图片缩小和背景填充
             img.thumbnail((target_w, target_h), Image.Resampling.LANCZOS)
+            
+            # 生成背景底板
             if config['bg_mode'] == "深度高斯模糊":
                 bg = img.convert("RGB").resize((target_w, target_h)).filter(ImageFilter.GaussianBlur(config['blur_radius'])).convert("RGBA")
             elif config['bg_mode'] == "特定颜色":
@@ -62,35 +67,54 @@ def process_engine(img_input, config, is_preview=False):
             else:
                 sample = img.convert("RGB").getpixel((img.size[0]//2, img.size[1]//2))
                 bg = Image.new("RGBA", (target_w, target_h), sample + (255,))
+            
+            # 居中合成
             bg.alpha_composite(img, ((target_w - img.size[0]) // 2, (target_h - img.size[1]) // 2))
             res_img = bg
 
-        # 滤镜与增强
+        # 3. 滤镜、亮度与锐化 (全程在 RGBA 下处理，确保预览/下载一致)
         if config['filter'] != "原色":
             r, g, b, a = res_img.split()
-            if config['filter'] == "暖色调": r = ImageEnhance.Brightness(r).enhance(1.1)
-            elif config['filter'] == "清爽调": b = ImageEnhance.Brightness(b).enhance(1.1)
+            if config['filter'] == "暖色调":
+                r = ImageEnhance.Brightness(r).enhance(1.1)
+            elif config['filter'] == "清爽调":
+                b = ImageEnhance.Brightness(b).enhance(1.1)
             res_img = Image.merge("RGBA", (r, g, b, a))
+            
+        # 亮度与锐化
+        br_enhancer = ImageEnhance.Brightness(res_img)
+        res_img = br_enhancer.enhance(config['bright'])
+        sh_enhancer = ImageEnhance.Sharpness(res_img)
+        res_img = sh_enhancer.enhance(config['sharp'])
 
-        is_transparent = (config['bg_mode'] == "特定颜色" and config['pure_color'] == "透明")
+        # 4. 准备导出
         out_io = io.BytesIO()
+        is_transparent = (config['bg_mode'] == "特定颜色" and config['pure_color'] == "透明")
         
         if is_transparent:
+            # 预览和下载都保存为 PNG 以展示透明底
             res_img.save(out_io, format="PNG")
             return out_io.getvalue(), "PNG"
         else:
+            # 预览和下载都转换为 RGB 后保存为 JPEG，确保体积控制
             final_rgb = res_img.convert("RGB")
-            final_rgb = ImageEnhance.Brightness(final_rgb).enhance(config['bright'])
-            final_rgb = ImageEnhance.Sharpness(final_rgb).enhance(config['sharp'])
-            q = 90 if is_preview else 95
-            while q > 30:
-                out_io = io.BytesIO()
+            
+            # 只有最终下载时才进行严格的体积压缩，预览时使用高速 JPEG
+            q = 85 if is_preview else 95
+            if not is_preview and config['limit_kb'] > 0:
+                while q > 30:
+                    out_io = io.BytesIO()
+                    final_rgb.save(out_io, format="JPEG", quality=q, optimize=True)
+                    if out_io.tell() <= config['limit_kb'] * 1024:
+                        break
+                    q -= 5
+            else:
                 final_rgb.save(out_io, format="JPEG", quality=q, optimize=True)
-                if out_io.tell() <= config['limit_kb'] * 1024 or is_preview or config['limit_kb'] == 0: break
-                q -= 5
+            
             return out_io.getvalue(), "JPEG"
-    except:
-        return None, "Error"
+            
+    except Exception as e:
+        return None, f"Error: {e}"
 
 # --- 4. 界面布局 ---
 st.title("🍽️ 餐影工坊 2.0 Pro")
@@ -101,6 +125,7 @@ with left_col:
     files = st.file_uploader("支持多图/PDF", type=['jpg','jpeg','png','pdf'], accept_multiple_files=True, key=f"up_{st.session_state.upload_key}")
     
     with st.expander("🛠️ 规格设置", expanded=True):
+        # 恢复之前的规格设置逻辑
         res_map = {
             "聚合标准 (1920*1080)": "1920*1080",
             "Kiosk/Emenu标准 (5:3)": "1000*600",
@@ -124,7 +149,8 @@ with left_col:
             kb = val if unit == "KB" else val * 1024
         else: kb = {"不限制": 0, "500KB": 500, "1MB": 1024}.get(vol_opt, 0)
 
-        scale_mode = st.radio("画面填充模式", ["等比完整展示 (留背景)", "居中裁剪铺满 (大图感)"], index=0)
+        # 【重点修复】填充模式优化：默认设为居中裁剪铺满，对齐图1效果
+        scale_mode = st.radio("画面填充模式", ["居中裁剪铺满 (大图感，推荐)", "等比完整展示 (留背景)"], index=0)
 
     with st.expander("🎨 视觉设置", expanded=False):
         auto_crop = st.toggle("多主体识别拆分", value=False)
@@ -143,25 +169,29 @@ with right_col:
                 'blur_radius': b_radius, 'filter': flt, 'bright': br, 'sharp': sh, 
                 'scale_mode': scale_mode}
 
+        # 核心修复：确保预览和下载使用完全相同的 conf 和逻辑
         with st.container(height=500):
             cols = st.columns(3)
             for idx, f in enumerate(files):
                 with cols[idx % 3]:
-                    p_bytes, _ = process_engine(f, conf, is_preview=True)
-                    if p_bytes: st.image(p_bytes, use_container_width=True)
+                    # 调用 process_engine 生成 1:1 对应的预览图
+                    p_bytes, p_ext = process_engine(f, conf, is_preview=True)
+                    if p_bytes: 
+                        st.image(p_bytes, caption=f.name, use_container_width=True)
 
         st.write("---")
         
-        # 核心修改：区分单张下载和批量打包
+        # 区分单张下载和批量打包
         if len(files) == 1:
-            # 单图模式：直接显示下载按钮
-            data, ext = process_engine(files[0], conf)
+            # 单图模式：直接调用同一引擎生成下载图
+            with st.spinner("准备下载..."):
+                data, ext = process_engine(files[0], conf, is_preview=False)
             if data:
                 base_name = os.path.splitext(files[0].name)[0]
                 st.download_button(
                     label=f"📥 下载处理后的图片 ({ext})",
                     data=data,
-                    file_name=f"{base_name}.{ext.lower()}",
+                    file_name=f"{base_name}_2.0Pro.{ext.lower()}",
                     mime=f"image/{ext.lower()}",
                     type="primary",
                     use_container_width=True
@@ -175,7 +205,7 @@ with right_col:
                     with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
                         for i, f in enumerate(files):
                             status.write(f"正在处理: {f.name}")
-                            data, ext = process_engine(f, conf)
+                            data, ext = process_engine(f, conf, is_preview=False)
                             if data:
                                 base_name = os.path.splitext(f.name)[0]
                                 zf.writestr(f"{base_name}.{ext.lower()}", data)
