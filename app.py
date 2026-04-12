@@ -10,7 +10,6 @@ from concurrent.futures import ThreadPoolExecutor
 # --- 1. 页面配置 ---
 st.set_page_config(page_title="餐影工坊 2.0 Pro", layout="wide", page_icon="🍽️")
 
-# 初始化上传组件状态
 if 'upload_key' not in st.session_state:
     st.session_state.upload_key = 0
 
@@ -29,7 +28,7 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- 3. 核心算法 ---
+# --- 3. 核心算法 (保持原样) ---
 def smart_extract_multiple_subjects(pil_img):
     try:
         open_cv_image = np.array(pil_img.convert('RGB'))
@@ -125,19 +124,21 @@ with left_col:
             "海报标准 (1:1)": "1200*1200",
             "小红书 (3:4)": "900*1200"
         }
-        # 需求 4: 默认修改为“自定义” (索引为 2)
-        res_label = st.selectbox("比例预设", list(res_map.keys()), index=2)
         
+        # 需求修改：默认不选择任何比例
+        res_label = st.selectbox("比例预设", list(res_map.keys()), index=None, placeholder="请选择输出比例...")
+        
+        # 默认值初始化
+        tw, th = 1920, 1080
         if res_label == "自定义":
             tw = st.number_input("宽", 100, 4000, 1920)
             th = st.number_input("高", 100, 4000, 1080)
-        else:
+        elif res_label:
             tw, th = map(int, res_map[res_label].split('*'))
         
-        # 需求 1: 当选择 Kiosk (5:3) 时，体积控制自动关联 500KB
-        vol_options = ["不限制", "500KB", "1MB", "自定义"]
+        # 需求修改：Kiosk 自动关联 500KB
         default_vol_idx = 1 if res_label == "Kiosk/Emenu标准 (5:3)" else 0
-        vol_opt = st.selectbox("体积控制", vol_options, index=default_vol_idx)
+        vol_opt = st.selectbox("体积控制", ["不限制", "500KB", "1MB", "自定义"], index=default_vol_idx)
         
         kb = 0
         if vol_opt == "自定义":
@@ -157,13 +158,15 @@ with left_col:
         br = st.slider("亮度", 0.5, 1.5, 1.05)
         sh = st.slider("锐化", 1.0, 4.0, 1.5)
     
-    # 需求 3: 原“一键清空列表”位置换成“清空设置” (即重启应用)
+    # 需求修改：原位置换成“清空设置”
     if st.button("🔄 清空设置并刷新", use_container_width=True):
         st.rerun()
 
 with right_col:
     st.subheader("🔍 实时预览区")
-    if files:
+    if not res_label:
+        st.warning("⚠️ 请先在左侧选择一个“比例预设”以开启预览。")
+    elif files:
         final_list = []
         with st.spinner("处理中..."):
             for f in files:
@@ -188,13 +191,12 @@ with right_col:
 
         st.write("---")
         
-        # 需求 3: 将“一键清空列表”挪到下载按钮上方
+        # 需求修改：一键清空列表移至此处
         if st.button("🗑️ 一键清空上传列表", use_container_width=True):
             reset_uploader()
 
-        # 需求 2: 生成带日期和尺寸的文件名
+        # 需求修改：生成符合日期和比例的文件名标识
         date_str = datetime.now().strftime('%m%d')
-        # 处理尺寸显示格式
         if res_label == "自定义":
             size_tag = f"{tw}{th}"
         elif "5:3" in res_label:
@@ -205,8 +207,7 @@ with right_col:
         if len(final_list) == 1:
             data, ext = process_engine(final_list[0], conf)
             if data:
-                orig_name = getattr(final_list[0], 'filename', getattr(final_list[0], 'name', "output.jpg"))
-                st.download_button(label=f"📥 下载处理后的图片", data=data, 
+                st.download_button(label="📥 下载处理后的图片", data=data, 
                                    file_name=f"{date_str}-{size_tag}.{ext.lower()}", 
                                    mime=f"image/{ext.lower()}", type="primary", use_container_width=True)
         elif len(final_list) > 1:
@@ -222,7 +223,6 @@ with right_col:
                                 name = getattr(itm, 'filename', getattr(itm, 'name', f"img_{i}.jpg"))
                                 zf.writestr(f"{name.split('.')[0]}.{ext.lower()}", data)
                 
-                # 需求 2: 导出 zip 文件名为当前日期+尺寸
                 st.download_button(label="📥 点击获取 ZIP 压缩包", data=zip_buf.getvalue(), 
                                    file_name=f"{date_str}-{size_tag}.zip", 
                                    mime="application/zip", use_container_width=True)
