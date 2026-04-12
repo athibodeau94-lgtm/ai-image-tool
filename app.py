@@ -58,23 +58,45 @@ def process_engine(img_input, config, is_preview=False):
             img = img_input.convert("RGBA")
             
         tw, th = config['size']
+        # 预览模式下减半尺寸以提高速度
         render_w, render_h = (tw // 2, th // 2) if is_preview else (tw, th)
-        img.thumbnail((render_w, render_h), Image.Resampling.LANCZOS)
         
-        is_transparent = (config['bg_mode'] == "特定颜色" and config['pure_color'] == "透明")
+        # 保持原菜品比例，缩放到合适大小
+        img_temp = img.copy()
+        img_temp.thumbnail((render_w, render_h), Image.Resampling.LANCZOS)
         
+        # --- 背景处理优化：原景延伸逻辑 ---
         if config['bg_mode'] == "深度高斯模糊":
-            bg = img.convert("RGB").resize((render_w, render_h)).filter(ImageFilter.GaussianBlur(config['blur_radius'])).convert("RGBA")
+            img_bg = img.convert("RGB")
+            # 计算缩放比例以完全覆盖画布
+            bg_ratio = max(render_w / img_bg.width, render_h / img_bg.height)
+            new_size = (int(img_bg.width * bg_ratio), int(img_bg.height * bg_ratio))
+            img_bg = img_bg.resize(new_size, Image.Resampling.LANCZOS)
+            
+            # 居中裁切背景，使其完全匹配目标尺寸
+            left = (img_bg.width - render_w) / 2
+            top = (img_bg.height - render_h) / 2
+            img_bg = img_bg.crop((left, top, left + render_w, top + render_h))
+            
+            # 深度模糊与暗色遮罩，提升过渡自然度
+            bg = img_bg.filter(ImageFilter.GaussianBlur(config['blur_radius'])).convert("RGBA")
+            overlay = Image.new("RGBA", (render_w, render_h), (0, 0, 0, 20)) 
+            bg = Image.alpha_composite(bg, overlay)
+            
         elif config['bg_mode'] == "特定颜色":
             color_map = {"白色": (255,255,255,255), "黑色": (0,0,0,255), "灰色": (200,200,200,255), "透明": (0,0,0,0)}
             bg = Image.new("RGBA", (render_w, render_h), color_map.get(config['pure_color'], (255,255,255,255)))
         else:
             sample = img.convert("RGB").getpixel((img.size[0]//2, img.size[1]//2))
             bg = Image.new("RGBA", (render_w, render_h), sample + (255,))
-        
-        bg.alpha_composite(img, ((render_w - img.size[0]) // 2, (render_h - img.size[1]) // 2))
+
+        # 合成主体（居中放置）
+        pos_x = (render_w - img_temp.width) // 2
+        pos_y = (render_h - img_temp.height) // 2
+        bg.paste(img_temp, (pos_x, pos_y), img_temp)
         res = bg
 
+        # 滤镜/后处理
         if config['filter'] != "原色":
             r, g, b, a = res.split()
             if config['filter'] == "暖色调":
@@ -83,7 +105,7 @@ def process_engine(img_input, config, is_preview=False):
                 b = ImageEnhance.Brightness(b).enhance(1.1)
             res = Image.merge("RGBA", (r, g, b, a))
 
-        if not is_transparent:
+        if config['pure_color'] != "透明":
             alpha = res.getchannel('A')
             res = res.convert("RGB")
             res = ImageEnhance.Brightness(res).enhance(config['bright'])
@@ -91,7 +113,7 @@ def process_engine(img_input, config, is_preview=False):
             res.putalpha(alpha)
         
         out_io = io.BytesIO()
-        if is_transparent:
+        if config['pure_color'] == "透明":
             res.save(out_io, format="PNG")
             ext = "PNG"
         else:
@@ -124,8 +146,6 @@ with left_col:
             "海报标准 (1:1)": "1200*1200",
             "小红书 (3:4)": "900*1200"
         }
-        
-        # 需求：默认不选择，显示占位符
         res_label = st.selectbox("比例预设", list(res_map.keys()), index=None, placeholder="请选择输出比例...")
         
         tw, th = 1920, 1080
@@ -135,7 +155,6 @@ with left_col:
         elif res_label:
             tw, th = map(int, res_map[res_label].split('*'))
         
-        # 需求：Kiosk 自动关联 500KB
         default_vol_idx = 1 if res_label == "Kiosk/Emenu标准 (5:3)" else 0
         vol_opt = st.selectbox("体积控制", ["不限制", "500KB", "1MB", "自定义"], index=default_vol_idx)
         
@@ -157,7 +176,6 @@ with left_col:
         br = st.slider("亮度", 0.5, 1.5, 1.05)
         sh = st.slider("锐化", 1.0, 4.0, 1.5)
     
-    # 需求：将原本的清空列表位置换成清空设置
     if st.button("🔄 清空设置并刷新", use_container_width=True):
         st.rerun()
 
@@ -190,11 +208,9 @@ with right_col:
 
         st.write("---")
         
-        # 需求：将“一键清空列表”挪到下载按钮上方
         if st.button("🗑️ 一键清空上传列表", use_container_width=True):
             reset_uploader()
 
-        # 需求：生成日期+尺寸的文件名标识，连接符为 -
         date_str = datetime.now().strftime('%m%d')
         if res_label == "自定义":
             size_tag = f"{tw}-{th}"
