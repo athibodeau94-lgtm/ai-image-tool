@@ -28,7 +28,7 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- 3. 核心算法 (保持原样) ---
+# --- 3. 核心算法 ---
 def smart_extract_multiple_subjects(pil_img):
     try:
         open_cv_image = np.array(pil_img.convert('RGB'))
@@ -125,10 +125,9 @@ with left_col:
             "小红书 (3:4)": "900*1200"
         }
         
-        # 需求修改：默认不选择任何比例
+        # 需求：默认不选择，显示占位符
         res_label = st.selectbox("比例预设", list(res_map.keys()), index=None, placeholder="请选择输出比例...")
         
-        # 默认值初始化
         tw, th = 1920, 1080
         if res_label == "自定义":
             tw = st.number_input("宽", 100, 4000, 1920)
@@ -136,7 +135,7 @@ with left_col:
         elif res_label:
             tw, th = map(int, res_map[res_label].split('*'))
         
-        # 需求修改：Kiosk 自动关联 500KB
+        # 需求：Kiosk 自动关联 500KB
         default_vol_idx = 1 if res_label == "Kiosk/Emenu标准 (5:3)" else 0
         vol_opt = st.selectbox("体积控制", ["不限制", "500KB", "1MB", "自定义"], index=default_vol_idx)
         
@@ -158,7 +157,7 @@ with left_col:
         br = st.slider("亮度", 0.5, 1.5, 1.05)
         sh = st.slider("锐化", 1.0, 4.0, 1.5)
     
-    # 需求修改：原位置换成“清空设置”
+    # 需求：将原本的清空列表位置换成清空设置
     if st.button("🔄 清空设置并刷新", use_container_width=True):
         st.rerun()
 
@@ -191,18 +190,18 @@ with right_col:
 
         st.write("---")
         
-        # 需求修改：一键清空列表移至此处
+        # 需求：将“一键清空列表”挪到下载按钮上方
         if st.button("🗑️ 一键清空上传列表", use_container_width=True):
             reset_uploader()
 
-        # 需求修改：生成符合日期和比例的文件名标识
+        # 需求：生成日期+尺寸的文件名标识，连接符为 -
         date_str = datetime.now().strftime('%m%d')
         if res_label == "自定义":
-            size_tag = f"{tw}{th}"
+            size_tag = f"{tw}-{th}"
         elif "5:3" in res_label:
             size_tag = "5-3"
         else:
-            size_tag = res_map[res_label].replace('*', '')
+            size_tag = res_map[res_label].replace('*', '-')
 
         if len(final_list) == 1:
             data, ext = process_engine(final_list[0], conf)
