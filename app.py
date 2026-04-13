@@ -67,41 +67,44 @@ def process_engine(img_input, config, is_preview=False):
         tw, th = config['size']
         render_w, render_h = (tw // 2, th // 2) if is_preview else (tw, th)
         
-        # 保持比例缩放主体菜品
-        img_main = img.copy()
-        img_main.thumbnail((render_w, render_h), Image.Resampling.LANCZOS)
-        
-        # --- 背景处理：原景镜像延伸逻辑 ---
-        if config['bg_mode'] == "深度高斯模糊":
+        # --- 核心逻辑分歧：是否强行铺满 ---
+        if config['fill_screen']:
+            # 铺满逻辑：裁切不变形
             img_bg = img.convert("RGB")
-            # 1. 缩放背景至填满画布的最小比例
             bg_ratio = max(render_w / img_bg.width, render_h / img_bg.height)
             bg_size = (int(img_bg.width * bg_ratio), int(img_bg.height * bg_ratio))
             img_bg = img_bg.resize(bg_size, Image.Resampling.LANCZOS)
-            
-            # 2. 居中裁切背景
             left = (img_bg.width - render_w) / 2
             top = (img_bg.height - render_h) / 2
-            bg = img_bg.crop((left, top, left + render_w, top + render_h))
-            
-            # 3. 应用模糊与暗部过渡增强
-            bg = bg.filter(ImageFilter.GaussianBlur(config['blur_radius'])).convert("RGBA")
-            dark_overlay = Image.new("RGBA", (render_w, render_h), (0, 0, 0, 25)) 
-            bg = Image.alpha_composite(bg, dark_overlay)
-            
-        elif config['bg_mode'] == "特定颜色":
-            color_map = {"白色": (255,255,255,255), "黑色": (0,0,0,255), "灰色": (200,200,200,255), "透明": (0,0,0,0)}
-            bg = Image.new("RGBA", (render_w, render_h), color_map.get(config['pure_color'], (255,255,255,255)))
+            res = img_bg.crop((left, top, left + render_w, top + render_h)).convert("RGBA")
         else:
-            sample = img.convert("RGB").getpixel((img.size[0]//2, img.size[1]//2))
-            bg = Image.new("RGBA", (render_w, render_h), sample + (255,))
-        
-        # 4. 合成主体
-        offset = ((render_w - img_main.width) // 2, (render_h - img_main.height) // 2)
-        bg.paste(img_main, offset, img_main)
-        res = bg
+            # 默认：主体比例缩放 + 背景延伸
+            img_main = img.copy()
+            img_main.thumbnail((render_w, render_h), Image.Resampling.LANCZOS)
+            
+            if config['bg_mode'] == "深度高斯模糊":
+                img_bg = img.convert("RGB")
+                bg_ratio = max(render_w / img_bg.width, render_h / img_bg.height)
+                bg_size = (int(img_bg.width * bg_ratio), int(img_bg.height * bg_ratio))
+                img_bg = img_bg.resize(bg_size, Image.Resampling.LANCZOS)
+                left = (img_bg.width - render_w) / 2
+                top = (img_bg.height - render_h) / 2
+                bg = img_bg.crop((left, top, left + render_w, top + render_h))
+                bg = bg.filter(ImageFilter.GaussianBlur(config['blur_radius'])).convert("RGBA")
+                dark_overlay = Image.new("RGBA", (render_w, render_h), (0, 0, 0, 25)) 
+                bg = Image.alpha_composite(bg, dark_overlay)
+            elif config['bg_mode'] == "特定颜色":
+                color_map = {"白色": (255,255,255,255), "黑色": (0,0,0,255), "灰色": (200,200,200,255), "透明": (0,0,0,0)}
+                bg = Image.new("RGBA", (render_w, render_h), color_map.get(config['pure_color'], (255,255,255,255)))
+            else:
+                sample = img.convert("RGB").getpixel((img.size[0]//2, img.size[1]//2))
+                bg = Image.new("RGBA", (render_w, render_h), sample + (255,))
+            
+            offset = ((render_w - img_main.width) // 2, (render_h - img_main.height) // 2)
+            bg.paste(img_main, offset, img_main)
+            res = bg
 
-        # 5. 滤镜与后期增强
+        # 滤镜/亮度/锐化
         if config['filter'] != "原色":
             r, g, b, a = res.split()
             if config['filter'] == "暖色调": r = ImageEnhance.Brightness(r).enhance(1.1)
@@ -117,7 +120,6 @@ def process_engine(img_input, config, is_preview=False):
         
         out_io = io.BytesIO()
         ext = "PNG" if (config['bg_mode'] == "特定颜色" and config['pure_color'] == "透明") else "JPEG"
-        
         if ext == "PNG":
             res.save(out_io, format="PNG")
         else:
@@ -157,7 +159,9 @@ with left_col:
         elif res_label:
             tw, th = map(int, res_map[res_label].split('*'))
         
-        vol_opt = st.selectbox("体积控制", ["不限制", "500KB", "1MB", "自定义"])
+        def_vol_idx = 1 if res_label == "Kiosk/Emenu标准 (5:3)" else 0
+        vol_opt = st.selectbox("体积控制", ["不限制", "500KB", "1MB", "自定义"], index=def_vol_idx)
+        
         kb = 0
         if vol_opt == "自定义":
             c1, c2 = st.columns([2, 1])
@@ -167,6 +171,7 @@ with left_col:
         else: kb = {"不限制": 0, "500KB": 500, "1MB": 1024}.get(vol_opt, 0)
 
     with st.expander("🎨 视觉设置", expanded=False):
+        is_fill = st.checkbox("🚀 强行铺满画布 (不变形裁切)", value=False)
         auto_crop = st.toggle("多主体识别拆分", value=False)
         bg_m = st.selectbox("背景模式", ["深度高斯模糊", "特定颜色", "提取原色"])
         p_color = "白色"
@@ -203,7 +208,7 @@ with right_col:
                 except: continue
 
         conf = {'size': (tw, th), 'limit_kb': kb, 'bg_mode': bg_m, 'pure_color': p_color, 
-                'blur_radius': b_radius, 'filter': flt, 'bright': br, 'sharp': sh}
+                'blur_radius': b_radius, 'filter': flt, 'bright': br, 'sharp': sh, 'fill_screen': is_fill}
 
         with st.container(height=520):
             cols = st.columns(3)
@@ -216,11 +221,15 @@ with right_col:
         if st.button("🗑️ 一键清空上传列表", use_container_width=True): reset_uploader()
 
         date_str = datetime.now().strftime('%m%d')
+        if res_label == "自定义": size_tag = f"{tw}-{th}"
+        elif "5:3" in res_label: size_tag = "5-3"
+        else: size_tag = res_map[res_label].replace('*', '-')
+
         if len(final_list) == 1:
             data, ext = process_engine(final_list[0], conf)
             if data:
                 st.download_button(label="📥 下载处理后的图片", data=data, 
-                                   file_name=f"{date_str}-output.{ext.lower()}", 
+                                   file_name=f"{date_str}-{size_tag}.{ext.lower()}", 
                                    mime=f"image/{ext.lower()}", type="primary", use_container_width=True)
         elif len(final_list) > 1:
             if st.button("🚀 准备批量下载 (打包 ZIP)", type="primary", use_container_width=True):
@@ -235,7 +244,7 @@ with right_col:
                                 name = getattr(itm, 'filename', getattr(itm, 'name', f"img_{i}.jpg"))
                                 zf.writestr(f"{name.split('.')[0]}.{ext.lower()}", data)
                 st.download_button(label="📥 点击获取 ZIP 压缩包", data=zip_buf.getvalue(), 
-                                   file_name=f"{date_str}-Batch.zip", 
+                                   file_name=f"{date_str}-{size_tag}.zip", 
                                    mime="application/zip", use_container_width=True)
     else:
         st.info("上传文件后，预览和下载按钮将在此处显示。")
