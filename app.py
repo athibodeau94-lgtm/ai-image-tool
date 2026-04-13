@@ -34,7 +34,6 @@ st.markdown("""
 # --- 3. 核心引擎 (保持羽化融合与深度模糊) ---
 def process_engine(img_input, config, is_preview=False):
     try:
-        # 兼容 BytesIO 或原始 PIL 对象
         if isinstance(img_input, (bytes, io.BytesIO)):
             img = Image.open(io.BytesIO(img_input if isinstance(img_input, bytes) else img_input.getvalue())).convert("RGBA")
         elif hasattr(img_input, 'getvalue'):
@@ -52,7 +51,7 @@ def process_engine(img_input, config, is_preview=False):
             new_size = (int(original_w * ratio), int(original_h * ratio))
             img_resized = img.resize(new_size, Image.Resampling.LANCZOS)
             
-            # 边界羽化融合 (维持之前解决生硬边界的逻辑)
+            # 边界羽化融合
             mask = Image.new("L", new_size, 255)
             if config['bg_mode'] in ["深度高斯模糊", "提取原色"]:
                 draw = ImageDraw.Draw(mask)
@@ -94,35 +93,35 @@ def process_engine(img_input, config, is_preview=False):
             else:
                 final_rgb.save(out_io, format="JPEG", quality=95, optimize=True)
             return out_io.getvalue(), "JPEG"
-    except Exception as e:
-        return None, str(e)
+    except:
+        return None, "Error"
 
 # --- 4. 界面布局 ---
 left_col, right_col = st.columns([1.1, 2.5], gap="large")
 
 with left_col:
-    st.subheader("📁 批量导入")
-    # 支持多图片上传，且现在支持上传整个 ZIP 文件夹
-    raw_uploads = st.file_uploader("直接拖入整个文件夹或其 ZIP 包", type=['jpg','jpeg','png','pdf','zip'], accept_multiple_files=True, key=f"up_{st.session_state.upload_key}")
+    st.subheader("📁 导入中心")
+    raw_uploads = st.file_uploader("支持拖入文件夹、ZIP包或多选图片", type=['jpg','jpeg','png','pdf','zip'], accept_multiple_files=True, key=f"up_{st.session_state.upload_key}")
     
-    processed_files = []
-    folder_name_hint = "Result"
+    processed_list = []
+    zip_prefix = ""
 
     if raw_uploads:
-        for f in raw_uploads:
-            if f.name.lower().endswith('.zip'):
-                # 核心：如果是解压包，自动提取内容
-                folder_name_hint = os.path.splitext(f.name)[0]
-                with zipfile.ZipFile(f) as z:
-                    for filename in z.namelist():
-                        if filename.lower().endswith(('.png', '.jpg', '.jpeg')):
-                            with z.open(filename) as img_file:
-                                img_data = img_file.read()
-                                # 模拟文件对象
-                                processed_files.append({"name": os.path.basename(filename), "content": img_data})
-            else:
-                processed_files.append({"name": f.name, "content": f})
-                if len(raw_uploads) > 1: folder_name_hint = "Batch"
+        # 判断是否包含 ZIP 包
+        zip_files = [f for f in raw_uploads if f.name.lower().endswith('.zip')]
+        if zip_files:
+            # 规则 1：如果是压缩包，取其原名
+            zip_prefix = os.path.splitext(zip_files[0].name)[0]
+            with zipfile.ZipFile(zip_files[0]) as z:
+                for filename in z.namelist():
+                    if filename.lower().endswith(('.png', '.jpg', '.jpeg')) and not filename.startswith('__MACOSX'):
+                        with z.open(filename) as img_f:
+                            processed_list.append({"name": os.path.basename(filename), "content": img_f.read()})
+        else:
+            # 规则 2：全选图片或拖入文件夹，取当天日期
+            zip_prefix = datetime.now().strftime("%m%d")
+            for f in raw_uploads:
+                processed_list.append({"name": f.name, "content": f})
 
     with st.container():
         with st.expander("🛠️ 规格设置", expanded=True):
@@ -134,11 +133,11 @@ with left_col:
             if res_label == "自定义尺寸":
                 tw = st.number_input("宽", 100, 4000, 1920, key=f"tw_{st.session_state.settings_key}")
                 th = st.number_input("高", 100, 4000, 1080, key=f"th_{st.session_state.settings_key}")
-                name_part = f"{tw}-{th}"
+                dim_name = f"{tw}-{th}"
             else:
                 raw_val = res_map[res_label]
                 tw, th = (1920, 1080) if raw_val == "none" else map(int, raw_val.split('*'))
-                name_part = "5-3" if "5:3" in res_label else raw_val.replace("*", "-")
+                dim_name = "5-3" if "5:3" in res_label else raw_val.replace("*", "-")
 
             vol_opt = st.selectbox("体积控制", ["不限制", "500KB", "1MB", "自定义"], index=vol_default_idx, key=f"vol_{st.session_state.settings_key}")
             kb = {"不限制": 0, "500KB": 500, "1MB": 1024}.get(vol_opt, 0)
@@ -151,41 +150,49 @@ with left_col:
                 p_color = st.selectbox("底色选择", ["白色", "黑色", "灰色", "透明"], key=f"pcol_{st.session_state.settings_key}")
             b_radius = st.slider("模糊强度", 0, 200, 70, key=f"brad_{st.session_state.settings_key}")
             flt = st.selectbox("滤镜效果", ["原色", "暖色调", "清爽调"], key=f"flt_{st.session_state.settings_key}")
-            br = st.slider("亮度调节", 0.5, 1.5, 1.0, key=f"br_{st.session_state.settings_key}")
-            sh = st.slider("锐化调节", 1.0, 4.0, 1.5, key=f"sh_{st.session_state.settings_key}")
+            br = st.slider("亮度", 0.5, 1.5, 1.0, key=f"br_{st.session_state.settings_key}")
+            sh = st.slider("锐化", 1.0, 4.0, 1.5, key=f"sh_{st.session_state.settings_key}")
 
     st.write("---")
-    if st.button("🔄 重置所有参数", use_container_width=True):
+    if st.button("🔄 重置所有设置", use_container_width=True):
         reset_all_settings()
 
 with right_col:
-    st.subheader("🔍 预览与一键处理")
-    if processed_files:
+    st.subheader("🔍 实时预览与导出")
+    if processed_list:
         conf = {'size': (tw, th), 'limit_kb': kb, 'bg_mode': bg_m, 'pure_color': p_color, 'blur_radius': b_radius, 'filter': flt, 'bright': br, 'sharp': sh, 'scale_mode': scale_mode}
         
         with st.container(height=450):
             cols = st.columns(3)
-            for idx, f_item in enumerate(processed_files):
+            for idx, item in enumerate(processed_list):
                 with cols[idx % 3]:
-                    p_bytes, _ = process_engine(f_item["content"], conf, is_preview=True)
-                    if p_bytes: st.image(p_bytes, use_container_width=True, caption=f_item["name"])
+                    p_bytes, _ = process_engine(item["content"], conf, is_preview=True)
+                    if p_bytes: st.image(p_bytes, use_container_width=True, caption=item["name"])
 
         st.write("---")
-        if st.button("🗑️ 清空列表", use_container_width=True):
+        if st.button("🗑️ 一键清空列表", use_container_width=True):
             reset_all_files()
         
-        final_zip_name = f"{folder_name_hint}-{name_part}.zip"
-
-        if st.button(f"🚀 导出该文件夹 (共 {len(processed_files)} 张)", type="primary", use_container_width=True):
-            zip_buf = io.BytesIO()
-            with st.status("正在极速加工...", expanded=True) as status:
-                with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
-                    for f_item in processed_files:
-                        data, ext = process_engine(f_item["content"], conf)
-                        if data:
-                            out_name = os.path.splitext(f_item["name"])[0]
-                            zf.writestr(f"{out_name}.{ext.lower()}", data)
-                status.update(label="✅ 处理完毕！", state="complete")
-            st.download_button(f"📥 下载处理后的文件夹: {final_zip_name}", data=zip_buf.getvalue(), file_name=final_zip_name, use_container_width=True)
+        # --- 导出命名核心逻辑 ---
+        if len(processed_list) == 1:
+            # 规则 3：单张图片输出原名
+            data, ext = process_engine(processed_list[0]["content"], conf)
+            if data:
+                orig_name = os.path.splitext(processed_list[0]["name"])[0]
+                st.download_button(f"🚀 下载处理后的图片: {processed_list[0]['name']}", data=data, file_name=f"{orig_name}.{ext.lower()}", type="primary", use_container_width=True)
+        else:
+            # 规则 4：打包下载，使用 文件夹名/日期 + 尺寸
+            final_zip_name = f"{zip_prefix}-{dim_name}.zip"
+            if st.button(f"🚀 打包下载 ({len(processed_list)}张)", type="primary", use_container_width=True):
+                zip_buf = io.BytesIO()
+                with st.status("处理中...", expanded=True) as status:
+                    with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+                        for item in processed_list:
+                            data, ext = process_engine(item["content"], conf)
+                            if data:
+                                name_only = os.path.splitext(item["name"])[0]
+                                zf.writestr(f"{name_only}.{ext.lower()}", data)
+                    status.update(label="✅ 打包完成！", state="complete")
+                st.download_button(f"📥 点击下载 {final_zip_name}", data=zip_buf.getvalue(), file_name=final_zip_name, use_container_width=True)
     else:
-        st.info("💡 请直接将文件夹（压缩后）或多张图片拖入左侧。")
+        st.info("💡 请在左侧上传区域开始工作。")
