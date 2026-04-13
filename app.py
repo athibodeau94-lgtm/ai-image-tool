@@ -1,5 +1,5 @@
 import streamlit as st
-from PIL import Image, ImageEnhance, ImageFilter, ImageOps
+from PIL import Image, ImageEnhance, ImageFilter, ImageOps, ImageDraw
 import io
 import zipfile
 import os
@@ -8,13 +8,11 @@ from datetime import datetime
 # --- 1. 页面配置 ---
 st.set_page_config(page_title="餐影工坊 2.0 Pro", layout="wide", page_icon="🍽️")
 
-# 初始化状态
 if 'upload_key' not in st.session_state:
     st.session_state.upload_key = 0
 if 'settings_key' not in st.session_state:
     st.session_state.settings_key = 0
 
-# 清空函数
 def reset_all_files():
     st.session_state.upload_key += 1
     st.rerun()
@@ -29,12 +27,11 @@ st.markdown("""
     header {visibility: hidden;}
     .block-container {padding-top: 2rem !important;}
     .stImage > img { object-fit: contain; }
-    /* 优化按钮间距 */
     .stDownloadButton, .stButton { margin-bottom: -10px; }
     </style>
     """, unsafe_allow_html=True)
 
-# --- 3. 核心引擎 (保持之前所有优化逻辑) ---
+# --- 3. 核心引擎 (强化融合处理) ---
 def process_engine(img_input, config, is_preview=False):
     try:
         if isinstance(img_input, (bytes, io.BytesIO)) or hasattr(img_input, 'getvalue'):
@@ -47,20 +44,33 @@ def process_engine(img_input, config, is_preview=False):
         if config.get('scale_mode') == "居中裁剪铺满 (大图感)":
             res_img = ImageOps.fit(img, (target_w, target_h), Image.Resampling.LANCZOS)
         else:
-            # 保持 100% 贴边的等比铺满逻辑
+            # 等比缩放
             original_w, original_h = img.size
             ratio = min(target_w / original_w, target_h / original_h)
             new_size = (int(original_w * ratio), int(original_h * ratio))
             img_resized = img.resize(new_size, Image.Resampling.LANCZOS)
             
+            # --- 边界融合增强：为前景图创建柔和遮罩 ---
+            # 创建一个与缩放后图片同尺寸的 alpha 遮罩，四周羽化 3 像素
+            mask = Image.new("L", new_size, 255)
+            if config['bg_mode'] in ["深度高斯模糊", "提取原色"]:
+                draw = ImageDraw.Draw(mask)
+                # 绘制一个略小的矩形并模糊，实现边缘淡入效果
+                draw.rectangle([0, 0, new_size[0], new_size[1]], outline=0, width=2)
+                mask = mask.filter(ImageFilter.GaussianBlur(radius=2)) 
+            img_resized.putalpha(mask)
+
+            # 背景生成
             if config['bg_mode'] == "深度高斯模糊":
                 bg = img.convert("RGB").resize((target_w//4, target_h//4))
                 bg = bg.filter(ImageFilter.GaussianBlur(config['blur_radius']))
                 bg = bg.resize((target_w, target_h), Image.Resampling.LANCZOS).convert("RGBA")
             elif config['bg_mode'] == "特定颜色":
                 color_map = {"白色": (255,255,255,255), "黑色": (0,0,0,255), "灰色": (200,200,200,255), "透明": (0,0,0,0)}
-                bg = Image.new("RGBA", (target_w, target_h), color_map.get(config['pure_color'], (255,255,255,255)))
-            else:
+                # 处理底色未选择的情况，默认白色
+                c = color_map.get(config['pure_color'], (255,255,255,255))
+                bg = Image.new("RGBA", (target_w, target_h), c)
+            else: # 提取原色
                 sample = img.convert("RGB").getpixel((img.size[0]//2, img.size[1]//2))
                 bg = Image.new("RGBA", (target_w, target_h), sample + (255,))
             
@@ -76,7 +86,6 @@ def process_engine(img_input, config, is_preview=False):
             return out_io.getvalue(), "PNG"
         else:
             final_rgb = res_img.convert("RGB")
-            # 体积控制逻辑
             q = 95
             if not is_preview and config['limit_kb'] > 0:
                 while q > 30:
@@ -97,19 +106,11 @@ with left_col:
     st.subheader("📁 导入与设置")
     files = st.file_uploader("支持多图/PDF", type=['jpg','jpeg','png','pdf'], accept_multiple_files=True, key=f"up_{st.session_state.upload_key}")
     
-    # 使用 settings_key 实现设置重置
     with st.container():
         with st.expander("🛠️ 规格设置", expanded=True):
-            res_map = {
-                "请选择...": "none",
-                "聚合标准 (1920*1080)": "1920*1080", 
-                "Kiosk/Emenu标准 (5:3)": "1000*600", 
-                "海报标准 (1:1)": "1200*1200",
-                "自定义尺寸": "custom"
-            }
+            res_map = {"请选择...": "none", "聚合标准 (1920*1080)": "1920*1080", "Kiosk/Emenu标准 (5:3)": "1000*600", "海报标准 (1:1)": "1200*1200", "自定义尺寸": "custom"}
             res_label = st.selectbox("比例预设", list(res_map.keys()), key=f"res_{st.session_state.settings_key}")
             
-            # 自动关联逻辑：只要不是空白且不是自定义，默认500KB
             vol_default_idx = 1 if res_label != "请选择..." else 0
             
             if res_label == "自定义尺寸":
@@ -122,20 +123,17 @@ with left_col:
                 name_part = "5-3" if "5:3" in res_label else raw_val.replace("*", "-")
 
             vol_opt = st.selectbox("体积控制", ["不限制", "500KB", "1MB", "自定义"], index=vol_default_idx, key=f"vol_{st.session_state.settings_key}")
-            kb = 0
-            if vol_opt == "自定义":
-                c1, c2 = st.columns([2, 1])
-                with c1: val = st.number_input("数值", 1, 10240, 500, key=f"vval_{st.session_state.settings_key}")
-                with c2: unit = st.selectbox("单位", ["KB", "MB"], key=f"vunit_{st.session_state.settings_key}")
-                kb = val if unit == "KB" else val * 1024
-            else:
-                kb = {"不限制": 0, "500KB": 500, "1MB": 1024}.get(vol_opt, 0)
-                
+            kb = {"不限制": 0, "500KB": 500, "1MB": 1024}.get(vol_opt, 0) if vol_opt != "自定义" else 500
             scale_mode = st.radio("画面填充模式", ["等比完整展示 (留背景)", "居中裁剪铺满 (大图感)"], index=0, key=f"sm_{st.session_state.settings_key}")
 
         with st.expander("🎨 视觉设置", expanded=False):
             bg_m = st.selectbox("背景模式", ["深度高斯模糊", "特定颜色", "提取原色"], key=f"bgm_{st.session_state.settings_key}")
-            p_color = st.selectbox("底色", ["白色", "黑色", "灰色", "透明"], key=f"pcol_{st.session_state.settings_key}")
+            
+            # --- 修复 1：条件隐藏底色 ---
+            p_color = "白色"
+            if bg_m == "特定颜色":
+                p_color = st.selectbox("底色", ["请选择...", "白色", "黑色", "灰色", "透明"], key=f"pcol_{st.session_state.settings_key}")
+            
             b_radius = st.slider("模糊强度", 0, 200, 70, key=f"brad_{st.session_state.settings_key}")
             flt = st.selectbox("滤镜效果", ["原色", "暖色调", "清爽调"], key=f"flt_{st.session_state.settings_key}")
             br = st.slider("亮度", 0.5, 1.5, 1.0, key=f"br_{st.session_state.settings_key}")
@@ -158,12 +156,9 @@ with right_col:
                     if p_bytes: st.image(p_bytes, use_container_width=True, caption=f.name)
 
         st.write("---")
-        
-        # 将清空列表移至右侧下载上方
         if st.button("🗑️ 一键清空预览列表", use_container_width=True):
             reset_all_files()
         
-        # 动态命名准备
         date_str = datetime.now().strftime("%m%d")
         final_zip_name = f"{date_str}-{name_part}.zip"
 
