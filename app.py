@@ -1,198 +1,151 @@
 import streamlit as st
-from PIL import Image, ImageEnhance, ImageFilter, ImageOps, ImageDraw
+from PIL import Image, ImageEnhance, ImageFilter
 import io
 import zipfile
-import os
+import numpy as np
+import cv2
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
 
-# --- 1. 页面配置 ---
+# --- 1. 页面配置与状态初始化 ---
 st.set_page_config(page_title="餐影工坊 2.0 Pro", layout="wide", page_icon="🍽️")
 
-if 'upload_key' not in st.session_state:
-    st.session_state.upload_key = 0
-if 'settings_key' not in st.session_state:
-    st.session_state.settings_key = 0
+if 'upload_key' not in st.session_state: st.session_state.upload_key = 0
+# 用于存储每张图的独立配置 {文件名: 配置字典}
+if 'individual_configs' not in st.session_state: st.session_state.individual_configs = {}
+# 当前正在微调的图片文件名
+if 'editing_file' not in st.session_state: st.session_state.editing_file = None
 
-def reset_all_files():
+def reset_all():
     st.session_state.upload_key += 1
+    st.session_state.individual_configs = {}
+    st.session_state.editing_file = None
     st.rerun()
 
-def reset_all_settings():
-    st.session_state.settings_key += 1
-    st.rerun()
-
-# --- 2. 样式注入 ---
+# --- 2. 注入 CSS ---
 st.markdown("""
     <style>
     header {visibility: hidden;}
-    .block-container {padding-top: 2rem !important;}
-    .stImage > img { border-radius: 4px; object-fit: contain; }
-    .stDownloadButton, .stButton { margin-bottom: -10px; }
+    [data-testid="stSidebar"] {display: none;}
+    .stImage { border-radius: 4px; border: 1px solid #eee; }
+    .edit-active { border: 2px solid #FF4B4B !important; background: #fff1f1; padding: 10px; border-radius: 8px; }
     </style>
     """, unsafe_allow_html=True)
 
-# --- 3. 核心引擎 (保持羽化融合与深度模糊) ---
+# --- 3. 核心算法 ---
 def process_engine(img_input, config, is_preview=False):
     try:
-        if isinstance(img_input, (bytes, io.BytesIO)):
-            img = Image.open(io.BytesIO(img_input if isinstance(img_input, bytes) else img_input.getvalue())).convert("RGBA")
-        elif hasattr(img_input, 'getvalue'):
-            img = Image.open(io.BytesIO(img_input.getvalue())).convert("RGBA")
-        else:
-            img = img_input.convert("RGBA")
-            
-        target_w, target_h = config['size']
+        img = Image.open(io.BytesIO(img_input.getvalue() if hasattr(img_input, 'getvalue') else img_input)).convert("RGBA")
+        tw, th = config['size']
+        render_w, render_h = (tw // 2, th // 2) if is_preview else (tw, th)
         
-        if config.get('scale_mode') == "居中裁剪铺满 (大图感)":
-            res_img = ImageOps.fit(img, (target_w, target_h), Image.Resampling.LANCZOS)
+        if config['fill_screen']:
+            img_bg = img.convert("RGB")
+            bg_ratio = max(render_w / img_bg.width, render_h / img_bg.height)
+            bg_size = (int(img_bg.width * bg_ratio), int(img_bg.height * bg_ratio))
+            img_bg = img_bg.resize(bg_size, Image.Resampling.LANCZOS)
+            left, top = (img_bg.width - render_w) / 2, (img_bg.height - render_h) / 2
+            res = img_bg.crop((left, top, left + render_w, top + render_h)).convert("RGBA")
         else:
-            original_w, original_h = img.size
-            ratio = min(target_w / original_w, target_h / original_h)
-            new_size = (int(original_w * ratio), int(original_h * ratio))
-            img_resized = img.resize(new_size, Image.Resampling.LANCZOS)
-            
-            # 边界羽化融合
-            mask = Image.new("L", new_size, 255)
-            if config['bg_mode'] in ["深度高斯模糊", "提取原色"]:
-                draw = ImageDraw.Draw(mask)
-                draw.rectangle([0, 0, new_size[0], new_size[1]], outline=0, width=2)
-                mask = mask.filter(ImageFilter.GaussianBlur(radius=3)) 
-            img_resized.putalpha(mask)
+            img_main = img.copy()
+            img_main.thumbnail((render_w, render_h), Image.Resampling.LANCZOS)
+            img_bg = img.convert("RGB")
+            bg_ratio = max(render_w / img_bg.width, render_h / img_bg.height)
+            img_bg = img_bg.resize((int(img_bg.width * bg_ratio), int(img_bg.height * bg_ratio)), Image.Resampling.LANCZOS)
+            bg = img_bg.crop(((img_bg.width-render_w)/2, (img_bg.height-render_h)/2, (img_bg.width+render_w)/2, (img_bg.height+render_h)/2))
+            bg = bg.filter(ImageFilter.GaussianBlur(config['blur_radius'])).convert("RGBA")
+            bg.paste(img_main, ((render_w - img_main.width)//2, (render_h - img_main.height)//2), img_main)
+            res = bg
 
-            if config['bg_mode'] == "深度高斯模糊":
-                bg = img.convert("RGB").resize((target_w//4, target_h//4))
-                bg = bg.filter(ImageFilter.GaussianBlur(config['blur_radius']))
-                bg = bg.resize((target_w, target_h), Image.Resampling.LANCZOS).convert("RGBA")
-            elif config['bg_mode'] == "特定颜色":
-                color_map = {"白色": (255,255,255,255), "黑色": (0,0,0,255), "灰色": (200,200,200,255), "透明": (0,0,0,0)}
-                c = color_map.get(config['pure_color'], (255,255,255,255))
-                bg = Image.new("RGBA", (target_w, target_h), c)
-            else:
-                sample = img.convert("RGB").getpixel((img.size[0]//2, img.size[1]//2))
-                bg = Image.new("RGBA", (target_w, target_h), sample + (255,))
-            
-            bg.alpha_composite(img_resized, ((target_w - img_resized.size[0]) // 2, (target_h - img_resized.size[1]) // 2))
-            res_img = bg
-
-        res_img = ImageEnhance.Brightness(res_img).enhance(config['bright'])
-        res_img = ImageEnhance.Sharpness(res_img).enhance(config['sharp'])
-
+        # 亮度/锐化
+        alpha = res.getchannel('A')
+        res = ImageEnhance.Brightness(res.convert("RGB")).enhance(config['bright'])
+        res = ImageEnhance.Sharpness(res).enhance(config['sharp'])
+        res.putalpha(alpha)
+        
         out_io = io.BytesIO()
-        if config['bg_mode'] == "特定颜色" and config['pure_color'] == "透明":
-            res_img.save(out_io, format="PNG")
-            return out_io.getvalue(), "PNG"
-        else:
-            final_rgb = res_img.convert("RGB")
-            q = 95
-            if not is_preview and config['limit_kb'] > 0:
-                while q > 30:
-                    out_io = io.BytesIO()
-                    final_rgb.save(out_io, format="JPEG", quality=q, optimize=True)
-                    if out_io.tell() <= config['limit_kb'] * 1024: break
-                    q -= 5
-            else:
-                final_rgb.save(out_io, format="JPEG", quality=95, optimize=True)
-            return out_io.getvalue(), "JPEG"
-    except:
-        return None, "Error"
+        res.convert("RGB").save(out_io, format="JPEG", quality=90 if is_preview else 95, optimize=True)
+        return out_io.getvalue(), "JPEG"
+    except: return None, "ERR"
 
 # --- 4. 界面布局 ---
-left_col, right_col = st.columns([1.1, 2.5], gap="large")
+left_col, right_col = st.columns([1, 2.5], gap="large")
 
 with left_col:
-    st.subheader("📁 导入中心")
-    raw_uploads = st.file_uploader("支持拖入文件夹、ZIP包或多选图片", type=['jpg','jpeg','png','pdf','zip'], accept_multiple_files=True, key=f"up_{st.session_state.upload_key}")
+    st.header("🎨 控制面板")
+    files = st.file_uploader("上传图片", type=['jpg','png','jpeg'], accept_multiple_files=True, key=f"up_{st.session_state.upload_key}")
     
-    processed_list = []
-    zip_prefix = ""
+    # 获取当前配置来源（是全局还是正在编辑的单张）
+    is_editing = st.session_state.editing_file is not None
+    current_title = f"正在微调：{st.session_state.editing_file}" if is_editing else "全局批量设置"
+    
+    with st.expander(current_title, expanded=True):
+        if is_editing:
+            st.info("💡 当前滑块仅对红框图片生效")
+        
+        is_fill = st.checkbox("强行铺满", value=False)
+        b_radius = st.slider("背景模糊", 0, 100, 40)
+        br = st.slider("亮度", 0.5, 1.5, 1.0)
+        sh = st.slider("锐化", 1.0, 5.0, 1.5)
+        
+        current_config = {
+            'size': (1920, 1080), 'limit_kb': 0, 'bg_mode': "深度高斯模糊", 
+            'blur_radius': b_radius, 'bright': br, 'sharp': sh, 'fill_screen': is_fill, 'pure_color':"白色", 'filter':"原色"
+        }
+        
+        # 如果在编辑模式，实时保存配置到 session_state
+        if is_editing:
+            st.session_state.individual_configs[st.session_state.editing_file] = current_config
+        
+        if is_editing and st.button("完成微调 (保存并返回全局)", use_container_width=True):
+            st.session_state.editing_file = None
+            st.rerun()
 
-    if raw_uploads:
-        # 判断是否包含 ZIP 包
-        zip_files = [f for f in raw_uploads if f.name.lower().endswith('.zip')]
-        if zip_files:
-            # 规则 1：如果是压缩包，取其原名
-            zip_prefix = os.path.splitext(zip_files[0].name)[0]
-            with zipfile.ZipFile(zip_files[0]) as z:
-                for filename in z.namelist():
-                    if filename.lower().endswith(('.png', '.jpg', '.jpeg')) and not filename.startswith('__MACOSX'):
-                        with z.open(filename) as img_f:
-                            processed_list.append({"name": os.path.basename(filename), "content": img_f.read()})
-        else:
-            # 规则 2：全选图片或拖入文件夹，取当天日期
-            zip_prefix = datetime.now().strftime("%m%d")
-            for f in raw_uploads:
-                processed_list.append({"name": f.name, "content": f})
-
-    with st.container():
-        with st.expander("🛠️ 规格设置", expanded=True):
-            res_map = {"请选择...": "none", "聚合标准 (1920*1080)": "1920*1080", "Kiosk/Emenu标准 (5:3)": "1000*600", "海报标准 (1:1)": "1200*1200", "自定义尺寸": "custom"}
-            res_label = st.selectbox("比例预设", list(res_map.keys()), key=f"res_{st.session_state.settings_key}")
-            
-            vol_default_idx = 1 if res_label != "请选择..." else 0
-            
-            if res_label == "自定义尺寸":
-                tw = st.number_input("宽", 100, 4000, 1920, key=f"tw_{st.session_state.settings_key}")
-                th = st.number_input("高", 100, 4000, 1080, key=f"th_{st.session_state.settings_key}")
-                dim_name = f"{tw}-{th}"
-            else:
-                raw_val = res_map[res_label]
-                tw, th = (1920, 1080) if raw_val == "none" else map(int, raw_val.split('*'))
-                dim_name = "5-3" if "5:3" in res_label else raw_val.replace("*", "-")
-
-            vol_opt = st.selectbox("体积控制", ["不限制", "500KB", "1MB", "自定义"], index=vol_default_idx, key=f"vol_{st.session_state.settings_key}")
-            kb = {"不限制": 0, "500KB": 500, "1MB": 1024}.get(vol_opt, 0)
-            scale_mode = st.radio("画面填充模式", ["等比完整展示 (留背景)", "居中裁剪铺满 (大图感)"], index=0, key=f"sm_{st.session_state.settings_key}")
-
-        with st.expander("🎨 视觉设置", expanded=False):
-            bg_m = st.selectbox("背景模式", ["深度高斯模糊", "特定颜色", "提取原色"], key=f"bgm_{st.session_state.settings_key}")
-            p_color = "白色"
-            if bg_m == "特定颜色":
-                p_color = st.selectbox("底色选择", ["白色", "黑色", "灰色", "透明"], key=f"pcol_{st.session_state.settings_key}")
-            b_radius = st.slider("模糊强度", 0, 200, 70, key=f"brad_{st.session_state.settings_key}")
-            flt = st.selectbox("滤镜效果", ["原色", "暖色调", "清爽调"], key=f"flt_{st.session_state.settings_key}")
-            br = st.slider("亮度", 0.5, 1.5, 1.0, key=f"br_{st.session_state.settings_key}")
-            sh = st.slider("锐化", 1.0, 4.0, 1.5, key=f"sh_{st.session_state.settings_key}")
-
-    st.write("---")
-    if st.button("🔄 重置所有设置", use_container_width=True):
-        reset_all_settings()
+    if st.button("🗑️ 全部清空", use_container_width=True): reset_all()
 
 with right_col:
-    st.subheader("🔍 实时预览与导出")
-    if processed_list:
-        conf = {'size': (tw, th), 'limit_kb': kb, 'bg_mode': bg_m, 'pure_color': p_color, 'blur_radius': b_radius, 'filter': flt, 'bright': br, 'sharp': sh, 'scale_mode': scale_mode}
+    if files:
+        st.subheader("🔍 预览与微调 (点击微调可单独设置)")
         
-        with st.container(height=450):
+        with st.container(height=550):
             cols = st.columns(3)
-            for idx, item in enumerate(processed_list):
-                with cols[idx % 3]:
-                    p_bytes, _ = process_engine(item["content"], conf, is_preview=True)
-                    if p_bytes: st.image(p_bytes, use_container_width=True, caption=item["name"])
+            for i, f in enumerate(files):
+                # 逻辑：如果这张图有独立配置，用独立的；否则用当前的全局配置
+                f_config = st.session_state.individual_configs.get(f.name, current_config if not is_editing else st.session_state.individual_configs.get(f.name, current_config))
+                
+                # 如果正处于全局模式，f_config 实时跟随滑块
+                if not is_editing and f.name not in st.session_state.individual_configs:
+                    f_config = current_config
 
-        st.write("---")
-        if st.button("🗑️ 一键清空列表", use_container_width=True):
-            reset_all_files()
-        
-        # --- 导出命名核心逻辑 ---
-        if len(processed_list) == 1:
-            # 规则 3：单张图片输出原名
-            data, ext = process_engine(processed_list[0]["content"], conf)
-            if data:
-                orig_name = os.path.splitext(processed_list[0]["name"])[0]
-                st.download_button(f"🚀 下载处理后的图片: {processed_list[0]['name']}", data=data, file_name=f"{orig_name}.{ext.lower()}", type="primary", use_container_width=True)
-        else:
-            # 规则 4：打包下载，使用 文件夹名/日期 + 尺寸
-            final_zip_name = f"{zip_prefix}-{dim_name}.zip"
-            if st.button(f"🚀 打包下载 ({len(processed_list)}张)", type="primary", use_container_width=True):
-                zip_buf = io.BytesIO()
-                with st.status("处理中...", expanded=True) as status:
-                    with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
-                        for item in processed_list:
-                            data, ext = process_engine(item["content"], conf)
-                            if data:
-                                name_only = os.path.splitext(item["name"])[0]
-                                zf.writestr(f"{name_only}.{ext.lower()}", data)
-                    status.update(label="✅ 打包完成！", state="complete")
-                st.download_button(f"📥 点击下载 {final_zip_name}", data=zip_buf.getvalue(), file_name=final_zip_name, use_container_width=True)
+                with cols[i % 3]:
+                    # 正在编辑的图片加红框
+                    is_this_editing = (st.session_state.editing_file == f.name)
+                    container_class = "edit-active" if is_this_editing else ""
+                    
+                    st.markdown(f'<div class="{container_class}">', unsafe_allow_html=True)
+                    p_bytes, _ = process_engine(f, f_config, is_preview=True)
+                    if p_bytes:
+                        st.image(p_bytes, caption=f.name[:15], use_container_width=True)
+                    
+                    if st.button("🛠️ 微调此图", key=f"btn_{f.name}"):
+                        st.session_state.editing_file = f.name
+                        # 进入微调时，如果它还没独立配置，先把当前的全局配置拷给它
+                        if f.name not in st.session_state.individual_configs:
+                            st.session_state.individual_configs[f.name] = current_config
+                        st.rerun()
+                    st.markdown('</div>', unsafe_allow_html=True)
+
+        # --- 批量打包下载 ---
+        if st.button("🚀 准备好所有图片，一键打包下载", type="primary", use_container_width=True):
+            zip_buf = io.BytesIO()
+            with zipfile.ZipFile(zip_buf, 'w') as zf:
+                for f in files:
+                    # 下载逻辑：优先使用 individual_configs 里的参数
+                    final_cfg = st.session_state.individual_configs.get(f.name, current_config)
+                    data, _ = process_engine(f, final_cfg, is_preview=False)
+                    zf.writestr(f.name, data)
+            
+            st.download_button("📥 点击下载 ZIP (包含所有微调结果)", zip_buf.getvalue(), 
+                               file_name=f"Batch_Fixed_{datetime.now().strftime('%H%M')}.zip", use_container_width=True)
     else:
-        st.info("💡 请在左侧上传区域开始工作。")
+        st.info("等待上传图片...")
