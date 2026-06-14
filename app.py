@@ -4,18 +4,13 @@ import io
 import zipfile
 import os
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
 
 # --- 1. 页面配置 ---
 st.set_page_config(page_title="餐影工坊 2.0 Pro", layout="wide", page_icon="🍽️")
 
-if 'upload_key' not in st.session_state:
-    st.session_state.upload_key = 0
 if 'settings_key' not in st.session_state:
     st.session_state.settings_key = 0
-
-def reset_all_files():
-    st.session_state.upload_key += 1
-    st.rerun()
 
 def reset_all_settings():
     st.session_state.settings_key += 1
@@ -31,7 +26,7 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- 3. 核心引擎 (保持羽化融合与深度模糊) ---
+# --- 3. 核心引擎 (修复透明底与深度模糊性能) ---
 def process_engine(img_input, config, is_preview=False):
     try:
         if isinstance(img_input, (bytes, io.BytesIO)):
@@ -43,6 +38,9 @@ def process_engine(img_input, config, is_preview=False):
             
         target_w, target_h = config['size']
         
+        # 显式捕获是否为透明底模式
+        is_transparent = (config['bg_mode'] == "特定颜色" and config['pure_color'] == "透明")
+        
         if config.get('scale_mode') == "居中裁剪铺满 (大图感)":
             res_img = ImageOps.fit(img, (target_w, target_h), Image.Resampling.LANCZOS)
         else:
@@ -51,20 +49,23 @@ def process_engine(img_input, config, is_preview=False):
             new_size = (int(original_w * ratio), int(original_h * ratio))
             img_resized = img.resize(new_size, Image.Resampling.LANCZOS)
             
-            # 边界羽化融合
+            # 边界羽化融合 (非透明模式才执行，避免透明图边缘受损)
             mask = Image.new("L", new_size, 255)
-            if config['bg_mode'] in ["深度高斯模糊", "提取原色"]:
+            if config['bg_mode'] in ["深度高斯模糊", "提取原色"] and not is_transparent:
                 draw = ImageDraw.Draw(mask)
                 draw.rectangle([0, 0, new_size[0], new_size[1]], outline=0, width=2)
                 mask = mask.filter(ImageFilter.GaussianBlur(radius=3)) 
             img_resized.putalpha(mask)
 
-            if config['bg_mode'] == "深度高斯模糊":
+            # 修复核心：根据模式创建底色，支持透明通道不转黑
+            if is_transparent:
+                bg = Image.new("RGBA", (target_w, target_h), (0, 0, 0, 0))
+            elif config['bg_mode'] == "深度高斯模糊":
                 bg = img.convert("RGB").resize((target_w//4, target_h//4))
                 bg = bg.filter(ImageFilter.GaussianBlur(config['blur_radius']))
                 bg = bg.resize((target_w, target_h), Image.Resampling.LANCZOS).convert("RGBA")
             elif config['bg_mode'] == "特定颜色":
-                color_map = {"白色": (255,255,255,255), "黑色": (0,0,0,255), "灰色": (200,200,200,255), "透明": (0,0,0,0)}
+                color_map = {"白色": (255,255,255,255), "黑色": (0,0,0,255), "灰色": (200,200,200,255)}
                 c = color_map.get(config['pure_color'], (255,255,255,255))
                 bg = Image.new("RGBA", (target_w, target_h), c)
             else:
@@ -78,18 +79,19 @@ def process_engine(img_input, config, is_preview=False):
         res_img = ImageEnhance.Sharpness(res_img).enhance(config['sharp'])
 
         out_io = io.BytesIO()
-        if config['bg_mode'] == "特定颜色" and config['pure_color'] == "透明":
+        # 修复核心：底色选择透明时，绝不转 RGB 模式，强制输出原汁原味的透明 PNG
+        if is_transparent:
             res_img.save(out_io, format="PNG")
             return out_io.getvalue(), "PNG"
         else:
             final_rgb = res_img.convert("RGB")
-            q = 95
+            # 体积控制步长优化：减少磁盘及内存重复读写循环
             if not is_preview and config['limit_kb'] > 0:
-                while q > 30:
+                for q in [95, 85, 70, 50, 30]:
                     out_io = io.BytesIO()
                     final_rgb.save(out_io, format="JPEG", quality=q, optimize=True)
-                    if out_io.tell() <= config['limit_kb'] * 1024: break
-                    q -= 5
+                    if out_io.tell() <= config['limit_kb'] * 1024:
+                        break
             else:
                 final_rgb.save(out_io, format="JPEG", quality=95, optimize=True)
             return out_io.getvalue(), "JPEG"
@@ -101,16 +103,15 @@ left_col, right_col = st.columns([1.1, 2.5], gap="large")
 
 with left_col:
     st.subheader("📁 导入中心")
-    raw_uploads = st.file_uploader("支持拖入文件夹、ZIP包或多选图片", type=['jpg','jpeg','png','pdf','zip'], accept_multiple_files=True, key=f"up_{st.session_state.upload_key}")
+    # Streamlit 自带组件的清空功能，无需额外一键清空按钮
+    raw_uploads = st.file_uploader("支持拖入文件夹、ZIP包或多选图片", type=['jpg','jpeg','png','pdf','zip'], accept_multiple_files=True)
     
     processed_list = []
     zip_prefix = ""
 
     if raw_uploads:
-        # 判断是否包含 ZIP 包
         zip_files = [f for f in raw_uploads if f.name.lower().endswith('.zip')]
         if zip_files:
-            # 规则 1：如果是压缩包，取其原名
             zip_prefix = os.path.splitext(zip_files[0].name)[0]
             with zipfile.ZipFile(zip_files[0]) as z:
                 for filename in z.namelist():
@@ -118,14 +119,21 @@ with left_col:
                         with z.open(filename) as img_f:
                             processed_list.append({"name": os.path.basename(filename), "content": img_f.read()})
         else:
-            # 规则 2：全选图片或拖入文件夹，取当天日期
             zip_prefix = datetime.now().strftime("%m%d")
             for f in raw_uploads:
-                processed_list.append({"name": f.name, "content": f})
+                processed_list.append({"name": f.name, "content": f.getvalue()})
 
     with st.container():
         with st.expander("🛠️ 规格设置", expanded=True):
-            res_map = {"请选择...": "none", "聚合标准 (1920*1080)": "1920*1080", "Kiosk/Emenu标准 (5:3)": "1000*600", "海报标准 (1:1)": "1200*1200", "自定义尺寸": "custom"}
+            # 需求修改 1：新增封面图和屏保预设，移除原先的海报标准(1:1)
+            res_map = {
+                "请选择...": "none", 
+                "聚合标准 (1920*1080)": "1920*1080", 
+                "Kiosk/Emenu标准 (5:3)": "1000*600", 
+                "封面图 (1080*1250)": "1080*1250",
+                "屏保 (1080*1920)": "1080*1920",
+                "自定义尺寸": "custom"
+            }
             res_label = st.selectbox("比例预设", list(res_map.keys()), key=f"res_{st.session_state.settings_key}")
             
             vol_default_idx = 1 if res_label != "请选择..." else 0
@@ -162,37 +170,48 @@ with right_col:
     if processed_list:
         conf = {'size': (tw, th), 'limit_kb': kb, 'bg_mode': bg_m, 'pure_color': p_color, 'blur_radius': b_radius, 'filter': flt, 'bright': br, 'sharp': sh, 'scale_mode': scale_mode}
         
+        # 性能改良核心：并发并行处理当前上传的全部文件（仅渲染和处理一次）
+        final_outputs = []
+        with st.spinner("🚀 多线程高速转码中..."):
+            with ThreadPoolExecutor() as executor:
+                futures = [executor.submit(process_engine, item["content"], conf, is_preview=False) for item in processed_list]
+                final_outputs = [f.result() for f in futures]
+        
+        # 1. 实时预览展现
         with st.container(height=450):
             cols = st.columns(3)
             for idx, item in enumerate(processed_list):
                 with cols[idx % 3]:
-                    p_bytes, _ = process_engine(item["content"], conf, is_preview=True)
-                    if p_bytes: st.image(p_bytes, use_container_width=True, caption=item["name"])
+                    p_bytes, _ = final_outputs[idx]
+                    if p_bytes: 
+                        st.image(p_bytes, use_container_width=True, caption=item["name"])
 
         st.write("---")
-        if st.button("🗑️ 一键清空列表", use_container_width=True):
-            reset_all_files()
-        
-        # --- 导出命名核心逻辑 ---
+        # 需求修改 5：此处已彻底移除原“一键清空列表”按钮的代码块
+
+        # 2. 原生秒速导出模块
         if len(processed_list) == 1:
-            # 规则 3：单张图片输出原名
-            data, ext = process_engine(processed_list[0]["content"], conf)
+            data, ext = final_outputs[0]
             if data:
                 orig_name = os.path.splitext(processed_list[0]["name"])[0]
                 st.download_button(f"🚀 下载处理后的图片: {processed_list[0]['name']}", data=data, file_name=f"{orig_name}.{ext.lower()}", type="primary", use_container_width=True)
         else:
-            # 规则 4：打包下载，使用 文件夹名/日期 + 尺寸
             final_zip_name = f"{zip_prefix}-{dim_name}.zip"
-            if st.button(f"🚀 打包下载 ({len(processed_list)}张)", type="primary", use_container_width=True):
-                zip_buf = io.BytesIO()
-                with st.status("处理中...", expanded=True) as status:
-                    with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
-                        for item in processed_list:
-                            data, ext = process_engine(item["content"], conf)
-                            if data:
-                                name_only = os.path.splitext(item["name"])[0]
-                                zf.writestr(f"{name_only}.{ext.lower()}", data)
-                    status.update(label="✅ 打包完成！", state="complete")
-                st.download_button(f"📥 点击下载 {final_zip_name}", data=zip_buf.getvalue(), file_name=final_zip_name, use_container_width=True)
+            zip_buf = io.BytesIO()
+            with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+                for idx, item in enumerate(processed_list):
+                    data, ext = final_outputs[idx]
+                    if data:
+                        name_only = os.path.splitext(item["name"])[0]
+                        zf.writestr(f"{name_only}.{ext.lower()}", data)
+            
+            # 直接渲染原生下载按钮，抛弃繁重的二次确认流程，一键秒下
+            st.download_button(
+                label=f"🚀 立即打包下载 ({len(processed_list)}张)", 
+                data=zip_buf.getvalue(), 
+                file_name=final_zip_name, 
+                type="primary", 
+                use_container_width=True
+            )
     else:
         st.info("💡 请在左侧上传区域开始工作。")
