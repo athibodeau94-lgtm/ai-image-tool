@@ -188,4 +188,60 @@ with left_col:
             bg_m = st.selectbox("背景模式", ["特定颜色", "深度高斯模糊", "提取原色"], key=f"bgm_{st.session_state.settings_key}")
             p_color = "白色"
             if bg_m == "特定颜色":
-                p_color = st.selectbox("底色选择", ["白色", "黑色", "灰色", "透明"], key=f
+                p_color = st.selectbox("底色选择", ["白色", "黑色", "灰色", "透明"], key=f"pcol_{st.session_state.settings_key}")
+            b_radius = st.slider("模糊强度", 0, 200, 70, key=f"brad_{st.session_state.settings_key}")
+            flt = st.selectbox("滤镜效果", ["原色", "暖色调", "清爽调"], key=f"flt_{st.session_state.settings_key}")
+            br = st.slider("亮度", 0.5, 1.5, 1.0, key=f"br_{st.session_state.settings_key}")
+            sh = st.slider("锐化", 1.0, 4.0, 1.5, key=f"sh_{st.session_state.settings_key}")
+
+    st.write("---")
+    if st.button("🔄 重置所有设置", use_container_width=True):
+        reset_all_settings()
+
+with right_col:
+    st.subheader("🔍 实时预览与导出")
+    if processed_list:
+        conf = {'size': (tw, th), 'limit_kb': kb, 'bg_mode': bg_m, 'pure_color': p_color, 'blur_radius': b_radius, 'filter': flt, 'bright': br, 'sharp': sh, 'scale_mode': scale_mode}
+        
+        final_outputs = []
+        with st.spinner("🚀 多线程图像并行洗图转码中..."):
+            with ThreadPoolExecutor() as executor:
+                futures = [executor.submit(process_engine, item["content"], conf, is_preview=False) for item in processed_list]
+                final_outputs = [f.result() for f in futures]
+        
+        # 1. 实时预览展现
+        with st.container(height=450):
+            cols = st.columns(3)
+            for idx, item in enumerate(processed_list):
+                with cols[idx % 3]:
+                    p_bytes, _ = final_outputs[idx]
+                    if p_bytes: 
+                        st.image(p_bytes, use_container_width=True, caption=item["name"])
+
+        st.write("---")
+
+        # 2. 原生一键秒速下载
+        if len(processed_list) == 1:
+            data, ext = final_outputs[0]
+            if data:
+                orig_name = os.path.splitext(processed_list[0]["name"])[0]
+                st.download_button(f"🚀 下载处理后的图片: {processed_list[0]['name']}", data=data, file_name=f"{orig_name}.{ext.lower()}", type="primary", use_container_width=True)
+        else:
+            final_zip_name = f"{zip_prefix}-{dim_name}.zip"
+            zip_buf = io.BytesIO()
+            with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+                for idx, item in enumerate(processed_list):
+                    data, ext = final_outputs[idx]
+                    if data:
+                        name_only = os.path.splitext(item["name"])[0]
+                        zf.writestr(f"{name_only}.{ext.lower()}", data)
+            
+            st.download_button(
+                label=f"🚀 立即打包下载 ({len(processed_list)}张)", 
+                data=zip_buf.getvalue(), 
+                file_name=final_zip_name, 
+                type="primary", 
+                use_container_width=True
+            )
+    else:
+        st.info("💡 请在左侧上传区域开始工作。")
