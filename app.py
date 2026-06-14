@@ -16,30 +16,45 @@ def reset_all_settings():
     st.session_state.settings_key += 1
     st.rerun()
 
-# --- 2. 样式注入 ---
+# --- 2. 样式注入 (新增棋盘格保护，防止网页把透明预览渲染成黑色) ---
 st.markdown("""
     <style>
     header {visibility: hidden;}
     .block-container {padding-top: 2rem !important;}
-    .stImage > img { border-radius: 4px; object-fit: contain; }
+    
+    /* 为预览图区域注入棋盘格背景，一眼识别透明底 */
+    .stImage > img { 
+        border-radius: 4px; 
+        object-fit: contain; 
+        background-image:决 color-mix(in srgb, transparent, #fff) !important;
+        background-color: #ffffff;
+        background-image: linear-gradient(45deg, #efefef 25%, transparent 25%, transparent 75%, #efefef 75%, #efefef), 
+                          linear-gradient(45deg, #efefef 25%, transparent 25%, transparent 75%, #efefef 75%, #efefef) !important;
+        background-size: 16px 16px !important;
+        background-position: 0 0, 8px 8px !important;
+    }
     .stDownloadButton, .stButton { margin-bottom: -10px; }
     </style>
     """, unsafe_allow_html=True)
 
-# --- 3. 核心引擎 (修复透明底与深度模糊性能) ---
+# --- 3. 核心引擎 (完美维持 Alpha 透明通道) ---
 def process_engine(img_input, config, is_preview=False):
     try:
         if isinstance(img_input, (bytes, io.BytesIO)):
-            img = Image.open(io.BytesIO(img_input if isinstance(img_input, bytes) else img_input.getvalue())).convert("RGBA")
+            img = Image.open(io.BytesIO(img_input if isinstance(img_input, bytes) else img_input.getvalue()))
         elif hasattr(img_input, 'getvalue'):
-            img = Image.open(io.BytesIO(img_input.getvalue())).convert("RGBA")
+            img = Image.open(io.BytesIO(img_input.getvalue()))
         else:
-            img = img_input.convert("RGBA")
+            img = img_input
+
+        # 检查原图是否自带透明通道 (RGBA 或 P 模式带透明度)
+        has_alpha = img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info)
+        img = img.convert("RGBA")
             
         target_w, target_h = config['size']
         
-        # 显式捕获是否为透明底模式
-        is_transparent = (config['bg_mode'] == "特定颜色" and config['pure_color'] == "透明")
+        # 判定最终是否需要保留透明底：用户显式选了透明，或者原图是透明且用户没开模糊/特定底色
+        is_transparent_out = (config['bg_mode'] == "特定颜色" and config['pure_color'] == "透明")
         
         if config.get('scale_mode') == "居中裁剪铺满 (大图感)":
             res_img = ImageOps.fit(img, (target_w, target_h), Image.Resampling.LANCZOS)
@@ -49,16 +64,17 @@ def process_engine(img_input, config, is_preview=False):
             new_size = (int(original_w * ratio), int(original_h * ratio))
             img_resized = img.resize(new_size, Image.Resampling.LANCZOS)
             
-            # 边界羽化融合 (非透明模式才执行，避免透明图边缘受损)
-            mask = Image.new("L", new_size, 255)
-            if config['bg_mode'] in ["深度高斯模糊", "提取原色"] and not is_transparent:
+            # 边界羽化融合 (只有不导出透明底时才做羽化，防止破坏透明边缘)
+            if config['bg_mode'] in ["深度高斯模糊", "提取原色"] and not is_transparent_out:
+                mask = Image.new("L", new_size, 255)
                 draw = ImageDraw.Draw(mask)
                 draw.rectangle([0, 0, new_size[0], new_size[1]], outline=0, width=2)
                 mask = mask.filter(ImageFilter.GaussianBlur(radius=3)) 
-            img_resized.putalpha(mask)
+                img_resized.putalpha(mask)
 
-            # 修复核心：根据模式创建底色，支持透明通道不转黑
-            if is_transparent:
+            # 根据配置生成画布
+            if is_transparent_out:
+                # 严格创建完全透明的纯净清澈底色画布
                 bg = Image.new("RGBA", (target_w, target_h), (0, 0, 0, 0))
             elif config['bg_mode'] == "深度高斯模糊":
                 bg = img.convert("RGB").resize((target_w//4, target_h//4))
@@ -69,23 +85,28 @@ def process_engine(img_input, config, is_preview=False):
                 c = color_map.get(config['pure_color'], (255,255,255,255))
                 bg = Image.new("RGBA", (target_w, target_h), c)
             else:
+                # 提取原色
                 sample = img.convert("RGB").getpixel((img.size[0]//2, img.size[1]//2))
                 bg = Image.new("RGBA", (target_w, target_h), sample + (255,))
             
+            # 使用 alpha_composite 完美贴合覆盖，保留全部源半透明度
             bg.alpha_composite(img_resized, ((target_w - img_resized.size[0]) // 2, (target_h - img_resized.size[1]) // 2))
             res_img = bg
 
+        # 调节亮度与锐度
         res_img = ImageEnhance.Brightness(res_img).enhance(config['bright'])
         res_img = ImageEnhance.Sharpness(res_img).enhance(config['sharp'])
 
         out_io = io.BytesIO()
-        # 修复核心：底色选择透明时，绝不转 RGB 模式，强制输出原汁原味的透明 PNG
-        if is_transparent:
+        
+        # 【全流程透明底保护逻辑】
+        if is_transparent_out:
+            # 只要是透明底输出，100% 锁死 PNG 格式，不转 RGB 
             res_img.save(out_io, format="PNG")
             return out_io.getvalue(), "PNG"
         else:
+            # 普通实体颜色底，转 RGB 存成小体积的高保真 JPG 
             final_rgb = res_img.convert("RGB")
-            # 体积控制步长优化：减少磁盘及内存重复读写循环
             if not is_preview and config['limit_kb'] > 0:
                 for q in [95, 85, 70, 50, 30]:
                     out_io = io.BytesIO()
@@ -103,7 +124,6 @@ left_col, right_col = st.columns([1.1, 2.5], gap="large")
 
 with left_col:
     st.subheader("📁 导入中心")
-    # Streamlit 自带组件的清空功能，无需额外一键清空按钮
     raw_uploads = st.file_uploader("支持拖入文件夹、ZIP包或多选图片", type=['jpg','jpeg','png','pdf','zip'], accept_multiple_files=True)
     
     processed_list = []
@@ -125,7 +145,6 @@ with left_col:
 
     with st.container():
         with st.expander("🛠️ 规格设置", expanded=True):
-            # 需求修改 1：新增封面图和屏保预设，移除原先的海报标准(1:1)
             res_map = {
                 "请选择...": "none", 
                 "聚合标准 (1920*1080)": "1920*1080", 
@@ -152,7 +171,7 @@ with left_col:
             scale_mode = st.radio("画面填充模式", ["等比完整展示 (留背景)", "居中裁剪铺满 (大图感)"], index=0, key=f"sm_{st.session_state.settings_key}")
 
         with st.expander("🎨 视觉设置", expanded=False):
-            bg_m = st.selectbox("背景模式", ["深度高斯模糊", "特定颜色", "提取原色"], key=f"bgm_{st.session_state.settings_key}")
+            bg_m = st.selectbox("背景模式", ["特定颜色", "深度高斯模糊", "提取原色"], key=f"bgm_{st.session_state.settings_key}")
             p_color = "白色"
             if bg_m == "特定颜色":
                 p_color = st.selectbox("底色选择", ["白色", "黑色", "灰色", "透明"], key=f"pcol_{st.session_state.settings_key}")
@@ -170,14 +189,13 @@ with right_col:
     if processed_list:
         conf = {'size': (tw, th), 'limit_kb': kb, 'bg_mode': bg_m, 'pure_color': p_color, 'blur_radius': b_radius, 'filter': flt, 'bright': br, 'sharp': sh, 'scale_mode': scale_mode}
         
-        # 性能改良核心：并发并行处理当前上传的全部文件（仅渲染和处理一次）
         final_outputs = []
-        with st.spinner("🚀 多线程高速转码中..."):
+        with st.spinner("🚀 极速转码中..."):
             with ThreadPoolExecutor() as executor:
                 futures = [executor.submit(process_engine, item["content"], conf, is_preview=False) for item in processed_list]
                 final_outputs = [f.result() for f in futures]
         
-        # 1. 实时预览展现
+        # 预览展现区域（此时透明图背部将呈现灰白棋盘格，不会再是一团死黑）
         with st.container(height=450):
             cols = st.columns(3)
             for idx, item in enumerate(processed_list):
@@ -187,9 +205,8 @@ with right_col:
                         st.image(p_bytes, use_container_width=True, caption=item["name"])
 
         st.write("---")
-        # 需求修改 5：此处已彻底移除原“一键清空列表”按钮的代码块
 
-        # 2. 原生秒速导出模块
+        # 统一打包/单选秒开下载
         if len(processed_list) == 1:
             data, ext = final_outputs[0]
             if data:
@@ -205,7 +222,6 @@ with right_col:
                         name_only = os.path.splitext(item["name"])[0]
                         zf.writestr(f"{name_only}.{ext.lower()}", data)
             
-            # 直接渲染原生下载按钮，抛弃繁重的二次确认流程，一键秒下
             st.download_button(
                 label=f"🚀 立即打包下载 ({len(processed_list)}张)", 
                 data=zip_buf.getvalue(), 
