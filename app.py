@@ -17,19 +17,19 @@ def reset_all_settings():
     st.session_state.settings_key += 1
     st.rerun()
 
-# --- 2. 样式注入 (集成电商级棋盘格保护，完美识别透明底) ---
+# --- 2. 样式注入 (已剔除乱码字符，完美透出菜品内容) ---
 st.markdown("""
     <style>
     header {visibility: hidden;}
     .block-container {padding-top: 2rem !important;}
     
-    /* 为预览图区域注入棋盘格背景，一眼识别透明底，防止网页将其渲染成死黑 */
+    /* 为预览图区域注入标准的电商透明棋盘格，不遮挡任何图像元素 */
     .stImage > img { 
         border-radius: 4px; 
         object-fit: contain; 
         background-color: #ffffff;
-        background-image: linear-gradient(45deg, #efefef 25%, transparent 25%, transparent 75%, #efefef 75%, #efefef), 
-                          linear-gradient(45deg, #efefef 25%, transparent 25%, transparent 75%, #efefef 75%, #efefef) !important;
+        background-image: linear-gradient(45deg, #f0f0f0 25%, transparent 25%, transparent 75%, #f0f0f0 75%, #f0f0f0), 
+                          linear-gradient(45deg, #f0f0f0 25%, transparent 25%, transparent 75%, #f0f0f0 75%, #f0f0f0) !important;
         background-size: 16px 16px !important;
         background-position: 0 0, 8px 8px !important;
     }
@@ -88,4 +88,104 @@ def process_engine(img_input, config, is_preview=False):
             res_img = bg
 
         # 调节亮度与锐度
-        res_img = Image
+        res_img = ImageEnhance.Brightness(res_img).enhance(config['bright'])
+        res_img = ImageEnhance.Sharpness(res_img).enhance(config['sharp'])
+
+        out_io = io.BytesIO()
+        
+        # 全流程透明底保护
+        if is_transparent_out:
+            res_img.save(out_io, format="PNG")
+            return out_io.getvalue(), "PNG"
+        else:
+            final_rgb = res_img.convert("RGB")
+            if not is_preview and config['limit_kb'] > 0:
+                for q in [95, 85, 70, 50, 30]:
+                    out_io = io.BytesIO()
+                    final_rgb.save(out_io, format="JPEG", quality=q, optimize=True)
+                    if out_io.tell() <= config['limit_kb'] * 1024:
+                        break
+            else:
+                final_rgb.save(out_io, format="JPEG", quality=95, optimize=True)
+            return out_io.getvalue(), "JPEG"
+    except:
+        return None, "Error"
+
+# --- 4. 界面布局 ---
+left_col, right_col = st.columns([1.1, 2.5], gap="large")
+
+with left_col:
+    st.subheader("📁 导入中心")
+    raw_uploads = st.file_uploader("支持拖入文件夹、ZIP包、PDF文档或多选图片", type=['jpg','jpeg','png','pdf','zip'], accept_multiple_files=True)
+    
+    processed_list = []
+    zip_prefix = ""
+
+    if raw_uploads:
+        zip_files = [f for f in raw_uploads if f.name.lower().endswith('.zip')]
+        pdf_files = [f for f in raw_uploads if f.name.lower().endswith('.pdf')]
+        
+        if zip_files:
+            zip_prefix = os.path.splitext(zip_files[0].name)[0]
+            with zipfile.ZipFile(zip_files[0]) as z:
+                for filename in z.namelist():
+                    if filename.lower().endswith(('.png', '.jpg', '.jpeg')) and not filename.startswith('__MACOSX'):
+                        with z.open(filename) as img_f:
+                            processed_list.append({"name": os.path.basename(filename), "content": img_f.read()})
+                            
+        elif pdf_files:
+            pdf_file = pdf_files[0]
+            zip_prefix = os.path.splitext(pdf_file.name)[0]
+            
+            doc = fitz.open(stream=pdf_file.getvalue(), filetype="pdf")
+            img_idx = 1
+            
+            for page_num in range(len(doc)):
+                page = doc[page_num]
+                for img_info in page.get_images(full=True):
+                    xref = img_info[0]
+                    base_image = doc.extract_image(xref)
+                    
+                    img_bytes = base_image["image"]
+                    img_ext = base_image["ext"]
+                    
+                    fake_name = f"pdf_img_{img_idx}.{img_ext}"
+                    processed_list.append({"name": fake_name, "content": img_bytes})
+                    img_idx += 1
+        else:
+            zip_prefix = datetime.now().strftime("%m%d")
+            for f in raw_uploads:
+                processed_list.append({"name": f.name, "content": f.getvalue()})
+
+    with st.container():
+        with st.expander("🛠️ 规格设置", expanded=True):
+            res_map = {
+                "请选择...": "none", 
+                "聚合标准 (1920*1080)": "1920*1080", 
+                "Kiosk/Emenu标准 (5:3)": "1000*600", 
+                "封面图 (1080*1250)": "1080*1250",
+                "屏保 (1080*1920)": "1080*1920",
+                "自定义尺寸": "custom"
+            }
+            res_label = st.selectbox("比例预设", list(res_map.keys()), key=f"res_{st.session_state.settings_key}")
+            
+            vol_default_idx = 1 if res_label != "请选择..." else 0
+            
+            if res_label == "自定义尺寸":
+                tw = st.number_input("宽", 100, 4000, 1920, key=f"tw_{st.session_state.settings_key}")
+                th = st.number_input("高", 100, 4000, 1080, key=f"th_{st.session_state.settings_key}")
+                dim_name = f"{tw}-{th}"
+            else:
+                raw_val = res_map[res_label]
+                tw, th = (1920, 1080) if raw_val == "none" else map(int, raw_val.split('*'))
+                dim_name = "5-3" if "5:3" in res_label else raw_val.replace("*", "-")
+
+            vol_opt = st.selectbox("体积控制", ["不限制", "500KB", "1MB", "自定义"], index=vol_default_idx, key=f"vol_{st.session_state.settings_key}")
+            kb = {"不限制": 0, "500KB": 500, "1MB": 1024}.get(vol_opt, 0)
+            scale_mode = st.radio("画面填充模式", ["等比完整展示 (留背景)", "居中裁剪铺满 (大图感)"], index=0, key=f"sm_{st.session_state.settings_key}")
+
+        with st.expander("🎨 视觉设置", expanded=False):
+            bg_m = st.selectbox("背景模式", ["特定颜色", "深度高斯模糊", "提取原色"], key=f"bgm_{st.session_state.settings_key}")
+            p_color = "白色"
+            if bg_m == "特定颜色":
+                p_color = st.selectbox("底色选择", ["白色", "黑色", "灰色", "透明"], key=f
