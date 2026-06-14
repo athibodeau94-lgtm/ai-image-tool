@@ -17,7 +17,7 @@ def reset_all_settings():
     st.session_state.settings_key += 1
     st.rerun()
 
-# --- 2. 样式注入 ---
+# --- 2. 样式注入 (已剔除乱码字符，完美透出菜品内容) ---
 st.markdown("""
     <style>
     header {visibility: hidden;}
@@ -36,24 +36,6 @@ st.markdown("""
     .stDownloadButton, .stButton { margin-bottom: -10px; }
     </style>
     """, unsafe_allow_html=True)
-
-# --- 新增：PDF 低清小图强力高清算法 ---
-def super_resolve_and_sharpen(img_obj):
-    """
-    通过双阶超分重采样与边缘增强，彻底清除 PDF 栅格化带来的低分辨率马赛克与锯齿
-    """
-    w, h = img_obj.size
-    # 如果提取出的单图过小（比如任意一边低于 1000 像素），则执行强力超分重建
-    if w < 1000 or h < 1000:
-        scale_factor = 2 if max(w, h) > 500 else 3
-        new_w, new_h = int(w * scale_factor), int(h * scale_factor)
-        # 第一步：高保真级重采样拉伸，平滑马赛克色块
-        img_obj = img_obj.resize((new_w, new_h), Image.Resampling.LANCZOS)
-        
-    # 第二步：高能边缘锐化修复（连续叠加轻量边缘增强，收窄虚焦的毛边）
-    img_obj = img_obj.filter(ImageFilter.EDGE_ENHANCE)
-    img_obj = ImageEnhance.Sharpness(img_obj).enhance(1.4)
-    return img_obj
 
 # --- 3. 高性能核心引擎 (完美维持 Alpha 透明通道) ---
 def process_engine(img_input, config, is_preview=False):
@@ -167,16 +149,8 @@ with left_col:
                     img_bytes = base_image["image"]
                     img_ext = base_image["ext"]
                     
-                    # 【核心优化点】：将其读入 PIL 对象，直接利用超分修复算法把马赛克洗掉
-                    raw_pil = Image.open(io.BytesIO(img_bytes))
-                    hd_pil = super_resolve_and_sharpen(raw_pil)
-                    
-                    # 将高清重构后的图片转回字节流传递给核心排版引擎
-                    hd_io = io.BytesIO()
-                    hd_pil.save(hd_io, format="PNG" if img_ext.lower() == "png" else "JPEG")
-                    
                     fake_name = f"pdf_img_{img_idx}.{img_ext}"
-                    processed_list.append({"name": fake_name, "content": hd_io.getvalue()})
+                    processed_list.append({"name": fake_name, "content": img_bytes})
                     img_idx += 1
         else:
             zip_prefix = datetime.now().strftime("%m%d")
