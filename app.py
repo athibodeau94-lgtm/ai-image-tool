@@ -53,7 +53,6 @@ def advanced_extract_foreground(img_obj):
         if min(h, w) < 50:
             return img_obj
             
-        # AI 全自动识别自适应围栏
         max_dim = 600
         scale = max_dim / max(h, w) if max(h, w) > max_dim else 1.0
         img_proc = cv2.resize(src, (int(w * scale), int(h * scale))) if scale != 1.0 else src.copy()
@@ -78,7 +77,6 @@ def advanced_extract_foreground(img_obj):
         else:
             rect = (int(w*0.05), int(h*0.05), int(w*0.9), int(h*0.9))
         
-        # 执行 GrabCut 通道融合抠图
         mask = np.zeros((h, w), np.uint8)
         bgdModel = np.zeros((1, 65), np.float64)
         fgdModel = np.zeros((1, 65), np.float64)
@@ -181,13 +179,16 @@ with left_col:
     with st.container():
         with st.expander("规格设置", expanded=True):
             res_map = {
+                "-- 请选择尺寸 --": None,
                 "聚合标准 (1920*1080)": "1920*1080", 
                 "Kiosk/Emenu标准 (5:3)": "1000*600", 
-                "封面图 (1080*1250)": "1080*1250",
-                "自定义尺寸": "custom"
+                "封面图 (1080*1250)": "1080*1250"
             }
             res_label = st.selectbox("比例预设", list(res_map.keys()), key=f"res_{st.session_state.settings_key}")
-            tw, th = (1920, 1080) if res_map[res_label] == "custom" else map(int, res_map[res_label].split('*'))
+            
+            tw, th = (1920, 1080)
+            if res_map[res_label]:
+                tw, th = map(int, res_map[res_label].split('*'))
             
             vol_opt = st.selectbox("体积控制", ["不限制", "500KB", "1MB"], key=f"vol_{st.session_state.settings_key}")
             scale_mode = st.radio("画面填充模式", ["等比完整展示 (留背景)", "居中裁剪铺满 (大图感)"], key=f"sm_{st.session_state.settings_key}")
@@ -222,44 +223,47 @@ with left_col:
 with right_col:
     st.subheader("实时预览与导出")
     if processed_list:
-        conf = {
-            'size': (tw, th), 'bg_mode': bg_m, 'pure_color': p_color, 
-            'blur_radius': b_radius, 'filter': flt, 'bright': br, 'sharp': sh, 
-            'scale_mode': scale_mode, 'auto_crop': auto_crop_mode
-        }
-        
-        if p_color == "-- 请选择底色 --":
-            st.warning("💡 请在左侧选择您需要的【底色颜色】以触发最终渲染输出")
-            conf['pure_color'] = "透明"
-            
-        final_outputs = []
-        with st.spinner("多线程并行图像高速洗图转码中..."):
-            with ThreadPoolExecutor() as executor:
-                futures = [executor.submit(process_engine, item["content"], conf) for item in processed_list]
-                final_outputs = [f.result() for f in futures]
-        
-        with st.container(height=480):
-            cols = st.columns(3)
-            for idx, item in enumerate(processed_list):
-                with cols[idx % 3]:
-                    p_bytes, _ = final_outputs[idx]
-                    if p_bytes: 
-                        st.image(p_bytes, use_container_width=True, caption=item["name"])
-
-        st.markdown("---")
-        if len(processed_list) == 1:
-            data, ext = final_outputs[0]
-            if data:
-                orig_name = os.path.splitext(processed_list[0]["name"])[0]
-                st.download_button(f"下载处理后的图片", data=data, file_name=f"{orig_name}_processed.{ext.lower()}", type="primary", use_container_width=True)
+        if res_map[res_label] is None:
+            st.info("请在左侧【规格设置】中选择比例预设后，即可进行处理。")
         else:
-            zip_buf = io.BytesIO()
-            with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+            conf = {
+                'size': (tw, th), 'bg_mode': bg_m, 'pure_color': p_color, 
+                'blur_radius': b_radius, 'filter': flt, 'bright': br, 'sharp': sh, 
+                'scale_mode': scale_mode, 'auto_crop': auto_crop_mode
+            }
+            
+            if p_color == "-- 请选择底色 --":
+                st.warning("💡 请在左侧选择您需要的【底色颜色】以触发最终渲染输出")
+                conf['pure_color'] = "透明"
+                
+            final_outputs = []
+            with st.spinner("多线程并行图像高速洗图转码中..."):
+                with ThreadPoolExecutor() as executor:
+                    futures = [executor.submit(process_engine, item["content"], conf) for item in processed_list]
+                    final_outputs = [f.result() for f in futures]
+            
+            with st.container(height=480):
+                cols = st.columns(3)
                 for idx, item in enumerate(processed_list):
-                    data, ext = final_outputs[idx]
-                    if data:
-                        name_only = os.path.splitext(item["name"])[0]
-                        zf.writestr(f"{name_only}.{ext.lower()}", data)
-            st.download_button(f"立即打包下载 ({len(processed_list)}张)", data=zip_buf.getvalue(), file_name=f"canyinggongfang_{zip_prefix}.zip", type="primary", use_container_width=True)
+                    with cols[idx % 3]:
+                        p_bytes, _ = final_outputs[idx]
+                        if p_bytes: 
+                            st.image(p_bytes, use_container_width=True, caption=item["name"])
+
+            st.markdown("---")
+            if len(processed_list) == 1:
+                data, ext = final_outputs[0]
+                if data:
+                    orig_name = os.path.splitext(processed_list[0]["name"])[0]
+                    st.download_button(f"下载处理后的图片", data=data, file_name=f"{orig_name}_processed.{ext.lower()}", type="primary", use_container_width=True)
+            else:
+                zip_buf = io.BytesIO()
+                with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+                    for idx, item in enumerate(processed_list):
+                        data, ext = final_outputs[idx]
+                        if data:
+                            name_only = os.path.splitext(item["name"])[0]
+                            zf.writestr(f"{name_only}.{ext.lower()}", data)
+                st.download_button(f"立即打包下载 ({len(processed_list)}张)", data=zip_buf.getvalue(), file_name=f"canyinggongfang_{zip_prefix}.zip", type="primary", use_container_width=True)
     else:
         st.info("请在左侧上传区域添加菜品图片开始工作。")
