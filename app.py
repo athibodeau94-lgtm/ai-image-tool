@@ -14,7 +14,6 @@ st.set_page_config(
     page_title="餐影工坊 2.0 Pro", 
     layout="wide"
 )
-)
 
 if 'settings_key' not in st.session_state:
     st.session_state.settings_key = 0
