@@ -65,14 +65,13 @@ def advanced_extract_foreground(img_obj):
         rgb_proc = img_proc[:, :, :3]
         filtered = cv2.bilateralFilter(rgb_proc, 9, 75, 75)
         
-        # 3. 智能菜品包围圈：不再死板划中央框，而是根据图像边缘自适应拓展边界
+        # 3. 智能菜品包围圈：根据图像边缘自适应拓展边界
         mask = np.zeros((proc_h, proc_w), np.uint8)
         gray = cv2.cvtColor(filtered, cv2.COLOR_RGB2GRAY)
         edges = cv2.Canny(gray, 30, 150)
         pts = np.argwhere(edges > 0)
         
         if len(pts) > 0:
-            # 根据边缘分布动态决定前景框，防止贴边菜品被切碎
             min_y, min_x = pts.min(axis=0)
             max_y, max_x = pts.max(axis=0)
             margin = 6
