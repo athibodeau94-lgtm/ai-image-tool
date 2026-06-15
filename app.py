@@ -146,4 +146,103 @@ with left_col:
                 for img_info in page.get_images(full=True):
                     raw_pil = Image.open(io.BytesIO(doc.extract_image(img_info[0])["image"]))
                     hd_io = io.BytesIO()
-                    super_resolve_and_sharpen(
+                    super_resolve_and_sharpen(raw_pil).save(hd_io, format="JPEG")
+                    processed_list.append({"name": f"pdf_img_{len(processed_list)+1}.jpg", "content": hd_io.getvalue()})
+        else:
+            zip_prefix = datetime.now().strftime("%m%d")
+            for f in raw_uploads: processed_list.append({"name": f.name, "content": f.getvalue()})
+
+    with st.container():
+        with st.expander("规格设置", expanded=True):
+            res_map = {"请选择...": "none", "聚合标准 (1920*1080)": "1920*1080", "Kiosk/Emenu标准 (5:3)": "1000*600", "封面图 (1080*1250)": "1080*1250"}
+            res_label = st.selectbox("比例预设", list(res_map.keys()))
+            tw, th = (1920, 1080) if res_map[res_label] == "none" else map(int, res_map[res_label].split('*'))
+            dim_name = "5-3" if "5:3" in res_label else res_map[res_label].replace("*", "-")
+            vol_opt = st.selectbox("体积控制", ["不限制", "500KB", "1MB"], index=1 if res_label != "请选择..." else 0)
+            kb = {"不限制": 0, "500KB": 500, "1MB": 1024}.get(vol_opt, 0)
+            scale_mode = st.radio("画面填充模式", ["等比完整展示 (留背景)", "居中裁剪铺满 (大图感)"])
+
+        with st.expander("视觉设置（不看数值·方向键懒人版）", expanded=True):
+            auto_crop_mode = st.checkbox("开启餐盘裁剪框提取", value=True)
+            
+            if auto_crop_mode:
+                st.markdown("### 🎯 第一步：一键套用盘子模板")
+                tmpl = st.radio("选择你的餐盘形状", ["长条寿司盘", "圆形/正方形餐盘", "全幅不裁剪"], horizontal=True)
+                
+                if tmpl == "长条寿司盘":
+                    st.session_state.pts = [[3, 15], [97, 4], [4, 92], [97, 78]]
+                elif tmpl == "圆形/正方形餐盘":
+                    st.session_state.pts = [[15, 15], [85, 15], [15, 85], [85, 85]]
+                elif tmpl == "全幅不裁剪":
+                    st.session_state.pts = [[0, 0], [100, 0], [0, 100], [100, 100]]
+
+                st.markdown("### 🕹️ 第二步：哪里不齐点哪里（极简微调）")
+                step_mode = st.radio("移动步长", ["正常微调 (1%)", "大步快调 (5%)"], horizontal=True)
+                step = 5 if "5%" in step_mode else 1
+                
+                target_corner = st.selectbox("选择你要调整的角", ["左上角 ↖", "右上角 ↗", "左下角 ↙", "右下角 ↘"])
+                c_idx = {"左上角 ↖": 0, "右上角 ↗": 1, "左下角 ↙": 2, "右下角 ↘": 3}[target_corner]
+                
+                # 纯方向键按钮组
+                b_col1, b_col2, b_col3, b_col4 = st.columns(4)
+                with b_col1:
+                    if st.button("⬅ 往左移"): st.session_state.pts[c_idx][0] = max(0, st.session_state.pts[c_idx][0] - step)
+                with b_col2:
+                    if st.button("➡ 往右移"): st.session_state.pts[c_idx][0] = min(100, st.session_state.pts[c_idx][0] + step)
+                with b_col3:
+                    if st.button("⬆ 往上移"): st.session_state.pts[c_idx][1] = max(0, st.session_state.pts[c_idx][1] - step)
+                with b_col4:
+                    if st.button("⬇ 往下移"): st.session_state.pts[c_idx][1] = min(100, st.session_state.pts[c_idx][1] + step)
+
+                if processed_list:
+                    try:
+                        ref_img = Image.open(io.BytesIO(processed_list[0]["content"])).convert("RGB")
+                        rw, rh = ref_img.size
+                        draw = ImageDraw.Draw(ref_img)
+                        p = st.session_state.pts
+                        draw.polygon([
+                            (p[0][0]*rw/100, p[0][1]*rh/100), 
+                            (p[1][0]*rw/100, p[1][1]*rh/100), 
+                            (p[3][0]*rw/100, p[3][1]*rh/100), 
+                            (p[2][0]*rw/100, p[2][1]*rh/100)
+                        ], outline="#FF3333", width=5)
+                        st.image(ref_img, use_container_width=True, caption="🔴 当前裁剪红框锁定范围（所见即所得）")
+                    except: pass
+
+            st.write("---")
+            bg_m = st.selectbox("背景模式", ["特定颜色", "深度高斯模糊", "提取原色"])
+            p_color = st.selectbox("底色选择", ["白色", "黑色", "灰色", "透明"]) if bg_m == "特定颜色" else "白色"
+            b_radius = st.slider("模糊强度", 0, 200, 70)
+            br = st.slider("亮度", 0.5, 1.5, 1.0)
+            sh = st.slider("锐化", 1.0, 4.0, 1.3)
+
+with right_col:
+    st.subheader("实时预览与导出")
+    if processed_list:
+        conf = {'size': (tw, th), 'limit_kb': kb, 'bg_mode': bg_m, 'pure_color': p_color, 'blur_radius': b_radius, 'bright': br, 'sharp': sh, 'scale_mode': scale_mode, 'auto_crop': auto_crop_mode}
+        final_outputs = []
+        with st.spinner("透视矫正与画面转码中..."):
+            with ThreadPoolExecutor() as executor:
+                futures = [executor.submit(process_engine, item["content"], conf, st.session_state.pts) for item in processed_list]
+                final_outputs = [f.result() for f in futures]
+        
+        with st.container(height=480):
+            cols = st.columns(2)
+            for idx, item in enumerate(processed_list):
+                with cols[idx % 2]:
+                    p_bytes, _ = final_outputs[idx]
+                    if p_bytes: st.image(p_bytes, use_container_width=True, caption=item["name"])
+
+        st.write("---")
+        if len(processed_list) == 1:
+            data, ext = final_outputs[0]
+            if data: st.download_button("下载处理后的图片", data=data, file_name=f"{os.path.splitext(processed_list[0]['name'])[0]}.{ext.lower()}", type="primary", use_container_width=True)
+        else:
+            zip_buf = io.BytesIO()
+            with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+                for idx, item in enumerate(processed_list):
+                    data, ext = final_outputs[idx]
+                    if data: zf.writestr(f"{os.path.splitext(item['name'])[0]}.{ext.lower()}", data)
+            st.download_button(label=f"立即打包下载 ({len(processed_list)}张)", data=zip_buf.getvalue(), file_name=f"{zip_prefix}-{dim_name}.zip", type="primary", use_container_width=True)
+    else:
+        st.info("请在左侧上传区域开始工作。")
