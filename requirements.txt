@@ -3,6 +3,3 @@ pillow
 numpy
 opencv-python-headless
 pymupdf
-rembg-cpu==2.0.53
-onnxruntime==1.15.1
-pillow-heif
