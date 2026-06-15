@@ -1,7 +1,8 @@
 streamlit
-Pillow
+pillow
 numpy
 opencv-python-headless
-pdf2image
-PyMuPDF
-pip install rembg pillow-heif
+pymupdf
+rembg-cpu==2.0.53
+onnxruntime==1.15.1
+pillow-heif
