@@ -166,7 +166,8 @@ def process_engine(img_input, config, is_preview=False):
                 bg = bg.resize((target_w, target_h), Image.Resampling.LANCZOS).convert("RGBA")
             elif config['bg_mode'] == "特定颜色":
                 color_map = {"白色": (255,255,255,255), "黑色": (0,0,0,255), "灰色": (200,200,200,255)}
-                c = color_map.get(config['pure_color'], (255,255,255,255))
+                # 兼容未选颜色状态，兜底默认使用透明
+                c = color_map.get(config['pure_color'], (0,0,0,0))
                 bg = Image.new("RGBA", (target_w, target_h), c)
             else:
                 sample = img.convert("RGB").getpixel((img.size[0]//2, img.size[1]//2))
@@ -180,7 +181,8 @@ def process_engine(img_input, config, is_preview=False):
 
         out_io = io.BytesIO()
         
-        if is_transparent_out:
+        if is_transparent_out or config.get('pure_color') not in ["白色", "黑色", "灰色"]:
+            # 如果是透明或未选择颜色，则输出带透明通道的 PNG 保证棋盘格能显示
             res_img.save(out_io, format="PNG")
             return out_io.getvalue(), "PNG"
         else:
@@ -277,18 +279,33 @@ with left_col:
             scale_mode = st.radio("画面填充模式", ["等比完整展示 (留背景)", "居中裁剪铺满 (大图感)"], index=0, key=f"sm_{st.session_state.settings_key}")
 
         with st.expander("视觉设置", expanded=False):
+            # 1. 核心联动逻辑：自动抠图勾选状态
             auto_crop_mode = st.checkbox("开启智能自动抠图 (智能提取菜品)", value=False, key=f"acrop_{st.session_state.settings_key}")
             
-            bg_m = st.selectbox("背景模式", ["深度高斯模糊", "特定颜色", "提取原色"], key=f"bgm_{st.session_state.settings_key}")
+            # 2. 核心联动逻辑：若开启抠图，背景模式强制锁定为“特定颜色”
+            bg_options = ["深度高斯模糊", "特定颜色", "提取原色"]
+            if auto_crop_mode:
+                bg_m = "特定颜色"
+                st.selectbox("背景模式", [bg_m], index=0, disabled=True, key=f"bgm_dis_{st.session_state.settings_key}", help="智能抠图开启时，背景模式固定为特定颜色")
+            else:
+                bg_m = st.selectbox("背景模式", bg_options, index=0, key=f"bgm_{st.session_state.settings_key}")
+                
             p_color = "白色"
             if bg_m == "特定颜色":
-                p_color = st.selectbox("底色选择", ["白色", "黑色", "灰色", "透明"], key=f"pcol_{st.session_state.settings_key}")
+                # 3. 核心联动逻辑：若开启抠图，底色选择默认显示空白提示 "-- 请选择底色 --"
+                if auto_crop_mode:
+                    color_options = ["-- 请选择底色 --", "白色", "黑色", "灰色", "透明"]
+                else:
+                    color_options = ["白色", "黑色", "灰色", "透明"]
+                    
+                p_color = st.selectbox("底色选择", color_options, index=0, key=f"pcol_{st.session_state.settings_key}")
+                
             b_radius = st.slider("模糊强度", 0, 200, 70, key=f"brad_{st.session_state.settings_key}")
             flt = st.selectbox("滤镜效果", ["原色", "暖色调", "清爽调"], key=f"flt_{st.session_state.settings_key}")
             br = st.slider("亮度", 0.5, 1.5, 1.0, key=f"br_{st.session_state.settings_key}")
             sh = st.slider("锐化", 1.0, 4.0, 1.5, key=f"sh_{st.session_state.settings_key}")
 
-    st.write("---")
+    st.markdown("---")
     if st.button("重置所有设置", use_container_width=True):
         reset_all_settings()
 
@@ -301,6 +318,10 @@ with right_col:
             'scale_mode': scale_mode, 'auto_crop': auto_crop_mode
         }
         
+        # 如果用户还没有主动选底色，提示用户选择，不阻塞预览区（默认给以透明底预览）
+        if p_color == "-- 请选择底色 --":
+            st.warning("💡 请在左侧选择您需要的【底色颜色】")
+            
         final_outputs = []
         with st.spinner("多线程图像并行洗图转码中..."):
             with ThreadPoolExecutor() as executor:
@@ -309,35 +330,4 @@ with right_col:
         
         with st.container(height=450):
             cols = st.columns(3)
-            for idx, item in enumerate(processed_list):
-                with cols[idx % 3]:
-                    p_bytes, _ = final_outputs[idx]
-                    if p_bytes: 
-                        st.image(p_bytes, use_container_width=True, caption=item["name"])
-
-        st.write("---")
-
-        if len(processed_list) == 1:
-            data, ext = final_outputs[0]
-            if data:
-                orig_name = os.path.splitext(processed_list[0]["name"])[0]
-                st.download_button(f"下载处理后的图片: {processed_list[0]['name']}", data=data, file_name=f"{orig_name}.{ext.lower()}", type="primary", use_container_width=True)
-        else:
-            final_zip_name = f"{zip_prefix}-{dim_name}.zip"
-            zip_buf = io.BytesIO()
-            with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
-                for idx, item in enumerate(processed_list):
-                    data, ext = final_outputs[idx]
-                    if data:
-                        name_only = os.path.splitext(item["name"])[0]
-                        zf.writestr(f"{name_only}.{ext.lower()}", data)
-            
-            st.download_button(
-                label=f"立即打包下载 ({len(processed_list)}张)", 
-                data=zip_buf.getvalue(), 
-                file_name=final_zip_name, 
-                type="primary", 
-                use_container_width=True
-            )
-    else:
-        st.info("请在左侧上传区域开始工作。")
+            for idx, item in enumerate(processed
