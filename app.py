@@ -1,5 +1,5 @@
 import streamlit as st
-from PIL import Image, ImageEnhance, ImageFilter, ImageOps
+from PIL import Image, ImageEnhance, ImageFilter, ImageOps, ImageDraw
 import io
 import zipfile
 import os
@@ -54,14 +54,19 @@ def perspective_crop_plate(img_obj, pts_pct):
         ], dtype=np.float32)
         
         # 计算餐盘目标摆正后的新宽高
-        width_a = np.sqrt(((src_pts[2][0] - src_pts[3][0]) ** 2) + ((src_pts[2][1] - src_pts[3][1]) ** 2))
-        width_b = np.sqrt(((src_pts[1][0] - src_pts[0][0]) ** 2) + ((src_pts[1][1] - src_pts[0][1]) ** 2))
+        width_a = np.sqrt(((src_pts[1][0] - src_pts[0][0]) ** 2) + ((src_pts[1][1] - src_pts[0][1]) ** 2))
+        width_b = np.sqrt(((src_pts[3][0] - src_pts[2][0]) ** 2) + ((src_pts[3][1] - src_pts[2][1]) ** 2))
         max_width = max(int(width_a), int(width_b))
 
-        height_a = np.sqrt(((src_pts[1][0] - src_pts[3][0]) ** 2) + ((src_pts[1][1] - src_pts[3][1]) ** 2))
-        height_b = np.sqrt(((src_pts[0][0] - src_pts[2][0]) ** 2) + ((src_pts[0][1] - src_pts[2][1]) ** 2))
+        height_a = np.sqrt(((src_pts[2][0] - src_pts[0][0]) ** 2) + ((src_pts[2][1] - src_pts[0][1]) ** 2))
+        height_b = np.sqrt(((src_pts[3][0] - src_pts[1][0]) ** 2) + ((src_pts[3][1] - src_pts[1][1]) ** 2))
         max_height = max(int(height_a), int(height_b))
         
+        # 防止极端零值
+        max_width = max(max_width, 50)
+        max_height = max(max_height, 50)
+        
+        # 顺时针映射映射点：左上、右上、左下、右下
         dst_pts = np.array([
             [0, 0],
             [max_width - 1, 0],
@@ -69,7 +74,6 @@ def perspective_crop_plate(img_obj, pts_pct):
             [max_width - 1, max_height - 1]
         ], dtype=np.float32)
         
-        # 进行透视变换
         m = cv2.getPerspectiveTransform(src_pts, dst_pts)
         warped = cv2.warpPerspective(src, m, (max_width, max_height))
         
@@ -90,7 +94,8 @@ def super_resolve_and_sharpen(img_obj):
 def process_engine(img_input, config, pts_pct=None):
     try:
         if isinstance(img_input, (bytes, io.BytesIO)):
-            img = Image.open(io.BytesIO(img_input if isinstance(bytes, bytes) else img_input.getvalue()))
+            raw_bytes = img_input if isinstance(img_input, bytes) else img_input.getvalue()
+            img = Image.open(io.BytesIO(raw_bytes))
         elif hasattr(img_input, 'getvalue'):
             img = Image.open(io.BytesIO(img_input.getvalue()))
         else:
@@ -98,7 +103,7 @@ def process_engine(img_input, config, pts_pct=None):
 
         img = img.convert("RGBA")
         
-        # 核心改动：如果开启自动抠图且有4点坐标，直接执行餐盘精准切边
+        # 核心：如果开启自动抠图且有4点坐标，直接执行餐盘精准切边并摆正
         if config.get('auto_crop', False) and pts_pct is not None:
             img = perspective_crop_plate(img, pts_pct)
             
@@ -145,11 +150,11 @@ def process_engine(img_input, config, pts_pct=None):
         return None, "Error"
 
 # --- 5. Streamlit 主交互界面 ---
-left_col, right_col = st.columns([1.2, 2.4], gap="large")
+left_col, right_col = st.columns([1.3, 2.4], gap="large")
 
 with left_col:
     st.subheader("导入中心")
-    raw_uploads = st.file_uploader("支持拖入文件夹、ZIP包、PDF文档或多选图片", type=['jpg','jpeg','png','pdf','zip'], accept_multiple_files=True)
+    raw_uploads = st.file_uploader("支持多选图片、ZIP包或PDF", type=['jpg','jpeg','png','pdf','zip'], accept_multiple_files=True)
     
     processed_list = []
     zip_prefix = ""
@@ -212,76 +217,4 @@ with left_col:
             scale_mode = st.radio("画面填充模式", ["等比完整展示 (留背景)", "居中裁剪铺满 (大图感)"], index=0, key=f"sm_{st.session_state.settings_key}")
 
         with st.expander("视觉设置", expanded=True):
-            auto_crop_mode = st.checkbox("开启智能自动抠图 (智能提取菜品)", value=False, key=f"acrop_{st.session_state.settings_key}")
-            
-            # 当开启智能抠图时，允许用户直接通过百分比滑块定义餐盘的 4 个顶角
-            if auto_crop_mode:
-                st.markdown("**📌 请微调下方滑块，使选择框完美锁定制餐盘的四个角：**")
-                col_pt1, col_pt2 = st.columns(2)
-                with col_pt1:
-                    p1_x = st.slider("左上角 X (%)", 0, 50, 2, key="p1x")
-                    p1_y = st.slider("左上角 Y (%)", 0, 50, 5, key="p1y")
-                    p3_x = st.slider("左下角 X (%)", 0, 50, 2, key="p3x")
-                    p3_y = st.slider("左下角 Y (%)", 50, 100, 95, key="p3y")
-                with col_pt2:
-                    p2_x = st.slider("右上角 X (%)", 50, 100, 98, key="p2x")
-                    p2_y = st.slider("右上角 Y (%)", 0, 50, 2, key="p2y")
-                    p4_x = st.slider("右下角 X (%)", 50, 100, 98, key="p4x")
-                    p4_y = st.slider("右下角 Y (%)", 50, 100, 80, key="p4y")
-                current_pts = [(p1_x, p1_y), (p2_x, p2_y), (p3_x, p3_y), (p4_x, p4_y)]
-            else:
-                current_pts = None
-
-            bg_m = st.selectbox("背景模式", ["特定颜色", "深度高斯模糊", "提取原色"], key=f"bgm_{st.session_state.settings_key}")
-            p_color = "白色"
-            if bg_m == "特定颜色":
-                p_color = st.selectbox("底色选择", ["白色", "黑色", "灰色", "透明"], key=f"pcol_{st.session_state.settings_key}")
-            b_radius = st.slider("模糊强度", 0, 200, 70, key=f"brad_{st.session_state.settings_key}")
-            br = st.slider("亮度", 0.5, 1.5, 1.0, key=f"br_{st.session_state.settings_key}")
-            sh = st.slider("锐化", 1.0, 4.0, 1.3, key=f"sh_{st.session_state.settings_key}")
-
-    st.write("---")
-    if st.button("重置所有设置", use_container_width=True):
-        reset_all_settings()
-
-with right_col:
-    st.subheader("实时预览与导出")
-    if processed_list:
-        conf = {
-            'size': (tw, th), 'limit_kb': kb, 'bg_mode': bg_m, 'pure_color': p_color, 
-            'blur_radius': b_radius, 'bright': br, 'sharp': sh, 
-            'scale_mode': scale_mode, 'auto_crop': auto_crop_mode
-        }
-        
-        final_outputs = []
-        with st.spinner("并行洗图转码中..."):
-            with ThreadPoolExecutor() as executor:
-                futures = [executor.submit(process_engine, item["content"], conf, current_pts) for item in processed_list]
-                final_outputs = [f.result() for f in futures]
-        
-        with st.container(height=480):
-            cols = st.columns(2)
-            for idx, item in enumerate(processed_list):
-                with cols[idx % 2]:
-                    p_bytes, _ = final_outputs[idx]
-                    if p_bytes: 
-                        st.image(p_bytes, use_container_width=True, caption=item["name"])
-
-        st.write("---")
-        if len(processed_list) == 1:
-            data, ext = final_outputs[0]
-            if data:
-                orig_name = os.path.splitext(processed_list[0]["name"])[0]
-                st.download_button(f"下载处理后的图片", data=data, file_name=f"{orig_name}.{ext.lower()}", type="primary", use_container_width=True)
-        else:
-            final_zip_name = f"{zip_prefix}-{dim_name}.zip"
-            zip_buf = io.BytesIO()
-            with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
-                for idx, item in enumerate(processed_list):
-                    data, ext = final_outputs[idx]
-                    if data:
-                        name_only = os.path.splitext(item["name"])[0]
-                        zf.writestr(f"{name_only}.{ext.lower()}", data)
-            st.download_button(label=f"立即打包下载 ({len(processed_list)}张)", data=zip_buf.getvalue(), file_name=final_zip_name, type="primary", use_container_width=True)
-    else:
-        st.info("请在左侧上传区域开始工作。")
+            auto_crop_mode = st.checkbox("开启智能自动抠图 (智能提取菜品)", value=False, key=f"acrop_{st.session_state.
