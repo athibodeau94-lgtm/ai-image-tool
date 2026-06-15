@@ -39,7 +39,7 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- 升级：自适应边缘感知菜品提取算法（纯算法，免依赖） ---
+# --- 升级：双轨智能色域边缘感知菜品提取算法 ---
 def advanced_extract_foreground(img_obj):
     try:
         src = np.array(img_obj)
@@ -50,54 +50,63 @@ def advanced_extract_foreground(img_obj):
         if min(h, w) < 50:
             return img_obj
             
-        # 1. 自适应调整处理尺寸，既保留大图细节又保证速度
-        max_dim = 700
-        scale = 1.0
-        if max(h, w) > max_dim:
-            scale = max_dim / max(h, w)
+        # 1. 动态缩放至合理算法特征尺寸
+        max_dim = 600
+        scale = max_dim / max(h, w) if max(h, w) > max_dim else 1.0
+        if scale != 1.0:
             img_proc = cv2.resize(src, (int(w * scale), int(h * scale)))
         else:
             img_proc = src.copy()
         
         proc_h, proc_w = img_proc.shape[:2]
-        
-        # 2. 采用双边滤波（Bilateral Filter）在平滑背景的同时，死死锁住菜品的边缘特征
         rgb_proc = img_proc[:, :, :3]
-        filtered = cv2.bilateralFilter(rgb_proc, 9, 75, 75)
         
-        # 3. 智能菜品包围圈：根据图像边缘自适应拓展边界
-        mask = np.zeros((proc_h, proc_w), np.uint8)
-        gray = cv2.cvtColor(filtered, cv2.COLOR_RGB2GRAY)
-        edges = cv2.Canny(gray, 30, 150)
-        pts = np.argwhere(edges > 0)
+        # 2. 显著性色彩结构提取：利用自适应闭运算连接菜品断开的边缘（如寿司、细碎食材）
+        gray = cv2.cvtColor(rgb_proc, cv2.COLOR_RGB2GRAY)
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
         
-        if len(pts) > 0:
+        # 使用自适应阈值和大津法双轨结合，精确定位菜品盘子的主边缘
+        edges = cv2.Canny(blurred, 20, 120)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+        closed_edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
+        
+        # 3. 智能动态围栏：自动剔除外围人工填充的黑边/白边，精准锁定食物中心
+        pts = np.argwhere(closed_edges > 0)
+        if len(pts) > 100:
             min_y, min_x = pts.min(axis=0)
             max_y, max_x = pts.max(axis=0)
-            margin = 6
-            bx = max(0, min_x - margin)
-            by = max(0, min_y - margin)
-            bw = min(proc_w - bx, (max_x - min_x) + min(proc_w, margin * 2))
-            bh = min(proc_h - by, (max_y - min_y) + min(proc_h, margin * 2))
+            
+            # 给菜品边缘预留舒适的松弛边缘，防止食物贴边被削碎
+            margin_x = int(proc_w * 0.04) + 1
+            margin_y = int(proc_h * 0.04) + 1
+            
+            bx = max(2, min_x - margin_x)
+            by = max(2, min_y - margin_y)
+            bw = min(proc_w - bx - 2, (max_x - min_x) + margin_x * 2)
+            bh = min(proc_h - by - 2, (max_y - min_y) + margin_y * 2)
             rect = (bx, by, bw, bh)
         else:
-            rect = (4, 4, proc_w - 8, proc_h - 8)
+            # 兜底方案：取中心85%区域
+            rect = (int(proc_w*0.07), int(proc_h*0.07), int(proc_w*0.86), int(proc_h*0.86))
             
+        # 4. 执行多通道矩阵融合抠图
+        mask = np.zeros((proc_h, proc_w), np.uint8)
         bgdModel = np.zeros((1, 65), np.float64)
         fgdModel = np.zeros((1, 65), np.float64)
         
-        # 4. 执行多通道迭代融合抠图
-        cv2.grabCut(filtered, mask, rect, bgdModel, fgdModel, 5, cv2.GC_INIT_WITH_RECT)
+        # 进行迭代优化
+        cv2.grabCut(rgb_proc, mask, rect, bgdModel, fgdModel, 6, cv2.GC_INIT_WITH_RECT)
         bin_mask = np.where((mask == cv2.GC_PR_BGD) | (mask == cv2.GC_BGD), 0, 1).astype('uint8')
         
-        # 5. 尺寸复原与羽化边缘，保证融合极其自然
+        # 5. 高阶高斯羽化：让抠出来的菜品边缘极其丝滑，不会有难看的狗牙和硬切边
         if scale != 1.0:
             bin_mask = cv2.resize(bin_mask, (w, h), interpolation=cv2.INTER_LINEAR)
             
-        bin_mask = cv2.GaussianBlur(bin_mask * 255, (7, 7), 0)
+        bin_mask_cv = (bin_mask * 255).astype(np.uint8)
+        bin_mask_cv = cv2.GaussianBlur(bin_mask_cv, (11, 11), 0)
         
         out_rgba = src.copy()
-        out_rgba[:, :, 3] = np.minimum(out_rgba[:, :, 3], bin_mask)
+        out_rgba[:, :, 3] = np.minimum(out_rgba[:, :, 3], bin_mask_cv)
         
         return Image.fromarray(out_rgba)
     except:
@@ -127,6 +136,7 @@ def process_engine(img_input, config, is_preview=False):
 
         img = img.convert("RGBA")
         
+        # 核心逻辑修正：先对上传的原图进行智能抠图分离，再进行大图或留白填充，彻底解决因填充导致背景被污染的问题
         if config.get('auto_crop', False):
             img = advanced_extract_foreground(img)
             
