@@ -12,7 +12,7 @@ import fitz
 # --- 1. 页面配置 ---
 st.set_page_config(
     page_title="餐影工坊 2.0 Pro", 
-    page_icon="🔴",  # 💡 提示：您可以在这里贴入您之前红底白皇冠的自定义图片URL链接
+    page_icon="🔴", 
     layout="wide"
 )
 
@@ -29,7 +29,6 @@ st.markdown("""
     header {visibility: hidden;}
     .block-container {padding-top: 2rem !important;}
     
-    /* 预览图区域标准的电商透明棋盘格 */
     .stImage > img { 
         border-radius: 4px; 
         object-fit: contain; 
@@ -44,7 +43,7 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 # --- 智能菜品提取算法 ---
-def advanced_extract_foreground(img_obj, bbox_pct=None):
+def advanced_extract_foreground(img_obj):
     try:
         src = np.array(img_obj)
         if src.shape[2] < 4:
@@ -54,41 +53,32 @@ def advanced_extract_foreground(img_obj, bbox_pct=None):
         if min(h, w) < 50:
             return img_obj
             
-        if bbox_pct:
-            # 使用用户手动微调的边界框区域
-            lx, rx, ty, by = bbox_pct['lx'], bbox_pct['rx'], bbox_pct['ty'], bbox_pct['by']
-            bx = max(0, int(w * (lx / 100)))
-            bw = max(10, int(w * (rx / 100)) - bx)
-            by_val = max(0, int(h * (ty / 100)))
-            bh = max(10, int(h * (by / 100)) - by_val)
-            rect = (bx, by_val, bw, bh)
+        # AI 全自动识别自适应围栏
+        max_dim = 600
+        scale = max_dim / max(h, w) if max(h, w) > max_dim else 1.0
+        img_proc = cv2.resize(src, (int(w * scale), int(h * scale))) if scale != 1.0 else src.copy()
+        
+        proc_h, proc_w = img_proc.shape[:2]
+        gray = cv2.cvtColor(img_proc[:, :, :3], cv2.COLOR_RGB2GRAY)
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        edges = cv2.Canny(blurred, 20, 120)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+        closed_edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
+        
+        pts = np.argwhere(closed_edges > 0)
+        if len(pts) > 100:
+            min_y, min_x = pts.min(axis=0)
+            max_y, max_x = pts.max(axis=0)
+            margin_x, margin_y = int(proc_w * 0.04) + 1, int(proc_h * 0.04) + 1
+            bx = max(2, min_x - margin_x)
+            by = max(2, min_y - margin_y)
+            bw = min(proc_w - bx - 2, (max_x - min_x) + margin_x * 2)
+            bh = min(proc_h - by - 2, (max_y - min_y) + margin_y * 2)
+            rect = (int(bx/scale), int(by/scale), int(bw/scale), int(bh/scale))
         else:
-            # AI 全自动识别自适应边缘围栏
-            max_dim = 600
-            scale = max_dim / max(h, w) if max(h, w) > max_dim else 1.0
-            img_proc = cv2.resize(src, (int(w * scale), int(h * scale))) if scale != 1.0 else src.copy()
-            
-            proc_h, proc_w = img_proc.shape[:2]
-            gray = cv2.cvtColor(img_proc[:, :, :3], cv2.COLOR_RGB2GRAY)
-            blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-            edges = cv2.Canny(blurred, 20, 120)
-            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
-            closed_edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
-            
-            pts = np.argwhere(closed_edges > 0)
-            if len(pts) > 100:
-                min_y, min_x = pts.min(axis=0)
-                max_y, max_x = pts.max(axis=0)
-                margin_x, margin_y = int(proc_w * 0.04) + 1, int(proc_h * 0.04) + 1
-                bx = max(2, min_x - margin_x)
-                by = max(2, min_y - margin_y)
-                bw = min(proc_w - bx - 2, (max_x - min_x) + margin_x * 2)
-                bh = min(proc_h - by - 2, (max_y - min_y) + margin_y * 2)
-                rect = (int(bx/scale), int(by/scale), int(bw/scale), int(bh/scale))
-            else:
-                rect = (int(w*0.05), int(h*0.05), int(w*0.9), int(h*0.9))
-            
-        # 执行 GrabCut 智能迭代优化
+            rect = (int(w*0.05), int(h*0.05), int(w*0.9), int(h*0.9))
+        
+        # 执行 GrabCut 通道融合抠图
         mask = np.zeros((h, w), np.uint8)
         bgdModel = np.zeros((1, 65), np.float64)
         fgdModel = np.zeros((1, 65), np.float64)
@@ -108,7 +98,7 @@ def advanced_extract_foreground(img_obj, bbox_pct=None):
     return img_obj
 
 # --- 核心处理引擎 ---
-def process_engine(img_input, config, bbox_pct=None):
+def process_engine(img_input, config):
     try:
         if isinstance(img_input, (bytes, io.BytesIO)):
             img = Image.open(io.BytesIO(img_input if isinstance(img_input, bytes) else img_input.getvalue()))
@@ -117,9 +107,8 @@ def process_engine(img_input, config, bbox_pct=None):
 
         img = img.convert("RGBA")
         
-        # 自动抠图独立运行
         if config.get('auto_crop', False):
-            img = advanced_extract_foreground(img, bbox_pct)
+            img = advanced_extract_foreground(img)
             
         target_w, target_h = config['size']
         is_transparent_out = (config['bg_mode'] == "特定颜色" and config['pure_color'] == "透明")
@@ -149,7 +138,6 @@ def process_engine(img_input, config, bbox_pct=None):
             bg.alpha_composite(img_resized, ((target_w - img_resized.size[0]) // 2, (target_h - img_resized.size[1]) // 2))
             res_img = bg
 
-        # 智能双轨滤镜算法
         if config.get('filter') == "暖色调":
             r, g, b, a = res_img.split()
             r = ImageEnhance.Brightness(r).enhance(1.1)
@@ -204,11 +192,9 @@ with left_col:
             vol_opt = st.selectbox("体积控制", ["不限制", "500KB", "1MB"], key=f"vol_{st.session_state.settings_key}")
             scale_mode = st.radio("画面填充模式", ["等比完整展示 (留背景)", "居中裁剪铺满 (大图感)"], key=f"sm_{st.session_state.settings_key}")
 
-        with st.expander("视觉设置 (智能抠图联动版)", expanded=True):
-            # 联动核心一：开启自动抠图多选框
+        with st.expander("视觉设置 (智能抠图版)", expanded=True):
             auto_crop_mode = st.checkbox("开启智能自动抠图 (智能提取菜品)", value=False, key=f"acrop_{st.session_state.settings_key}")
             
-            # 联动核心二：开启抠图后，背景模式自动切换为特定的特定颜色，并置灰禁用
             if auto_crop_mode:
                 bg_m = "特定颜色"
                 st.selectbox("背景模式", [bg_m], index=0, disabled=True, key=f"bgm_dis_{st.session_state.settings_key}")
@@ -217,35 +203,12 @@ with left_col:
                 
             p_color = "白色"
             if bg_m == "特定颜色":
-                # 联动核心三：开启自动抠图后，底色选择注入待选的空白行
                 if auto_crop_mode:
                     color_options = ["-- 请选择底色 --", "白色", "黑色", "灰色", "透明"]
                 else:
                     color_options = ["白色", "黑色", "灰色", "透明"]
                     
                 p_color = st.selectbox("底色选择", color_options, index=0, key=f"pcol_{st.session_state.settings_key}")
-
-            # 提取模式微调选择功能（匹配 2.0 Pro 面板控制）
-            extract_mode = "AI全自动识别"
-            bbox = None
-            if auto_crop_mode:
-                st.write("### 🎯 提取模式选择")
-                extract_mode = st.radio("选择定位方案", ["AI全自动识别", "手动精细调整"], horizontal=True)
-                
-                if extract_mode == "手动精细调整":
-                    st.write("📌 **微调四个角范围滑块：**")
-                    sc1, sc2 = st.columns(2)
-                    with sc1:
-                        lx = st.slider("左上 X (%)", 0, 50, 2)
-                        ty = st.slider("左上 Y (%)", 0, 50, 5)
-                        blx = st.slider("左下 X (%)", 0, 50, 2)
-                        bty = st.slider("左下 Y (%)", 50, 100, 85)
-                    with sc2:
-                        rx = st.slider("右上 X (%)", 50, 100, 98)
-                        rpy = st.slider("右上 Y (%)", 0, 50, 2)
-                        brx = st.slider("右下 X (%)", 50, 100, 99)
-                        bry = st.slider("右下 Y (%)", 50, 100, 85)
-                    bbox = {'lx': min(lx, blx), 'rx': max(rx, brx), 'ty': min(ty, rpy), 'by': max(bty, bry)}
 
             b_radius = st.slider("模糊强度", 0, 200, 70, key=f"brad_{st.session_state.settings_key}")
             flt = st.selectbox("滤镜效果", ["原色", "暖色调", "清爽调"], key=f"flt_{st.session_state.settings_key}")
@@ -265,15 +228,14 @@ with right_col:
             'scale_mode': scale_mode, 'auto_crop': auto_crop_mode
         }
         
-        # 拦截机制：待勾选空白态时友好阻断及引导
         if p_color == "-- 请选择底色 --":
-            st.warning("💡 请在左侧选择您需要的【底色选择】颜色以开启生成渲染。")
-            conf['pure_color'] = "透明"  # 默认使用透明缓冲预览区
+            st.warning("💡 请在左侧选择您需要的【底色颜色】以触发最终渲染输出")
+            conf['pure_color'] = "透明"
             
         final_outputs = []
-        with st.spinner("并行高速洗图转码中..."):
+        with st.spinner("多线程并行图像高速洗图转码中..."):
             with ThreadPoolExecutor() as executor:
-                futures = [executor.submit(process_engine, item["content"], conf, bbox) for item in processed_list]
+                futures = [executor.submit(process_engine, item["content"], conf) for item in processed_list]
                 final_outputs = [f.result() for f in futures]
         
         with st.container(height=480):
