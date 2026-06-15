@@ -330,4 +330,35 @@ with right_col:
         
         with st.container(height=450):
             cols = st.columns(3)
-            for idx, item in enumerate(processed
+            for idx, item in enumerate(processed_list):
+                with cols[idx % 3]:
+                    p_bytes, _ = final_outputs[idx]
+                    if p_bytes: 
+                        st.image(p_bytes, use_container_width=True, caption=item["name"])
+
+        st.markdown("---")
+
+        if len(processed_list) == 1:
+            data, ext = final_outputs[0]
+            if data:
+                orig_name = os.path.splitext(processed_list[0]["name"])[0]
+                st.download_button(f"下载处理后的图片: {processed_list[0]['name']}", data=data, file_name=f"{orig_name}.{ext.lower()}", type="primary", use_container_width=True)
+        else:
+            final_zip_name = f"{zip_prefix}-{dim_name}.zip"
+            zip_buf = io.BytesIO()
+            with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+                for idx, item in enumerate(processed_list):
+                    data, ext = final_outputs[idx]
+                    if data:
+                        name_only = os.path.splitext(item["name"])[0]
+                        zf.writestr(f"{name_only}.{ext.lower()}", data)
+            
+            st.download_button(
+                label=f"立即打包下载 ({len(processed_list)}张)", 
+                data=zip_buf.getvalue(), 
+                file_name=final_zip_name, 
+                type="primary", 
+                use_container_width=True
+            )
+    else:
+        st.info("请在左侧上传区域开始工作。")
