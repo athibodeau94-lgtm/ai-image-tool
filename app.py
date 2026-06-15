@@ -4,10 +4,18 @@ import io
 import zipfile
 import os
 import numpy as np
-import cv2
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 import fitz
+
+# --- 新增：导入商业级 AI 抠图库 ---
+try:
+    from rembg import remove, new_session
+    # 初始化一个轻量级的 AI 抠图会话，防止重复加载模型导致卡顿
+    bg_session = new_session("u2net_human_seg") 
+    HAS_REMBG = True
+except ImportError:
+    HAS_REMBG = False
 
 # --- 1. 页面配置 ---
 st.set_page_config(page_title="餐影工坊", layout="wide")
@@ -39,46 +47,28 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- 智能全自动抠图算法 ---
-def auto_extract_foreground(img_obj):
+# --- 升级：AI 智能精准抠图引擎 ---
+def ai_extract_foreground(img_obj):
+    if not HAS_REMBG:
+        return img_obj
     try:
-        src = np.array(img_obj)
-        if src.shape[2] < 4:
-            src = cv2.cvtColor(src, cv2.COLOR_RGB2RGBA)
-            
-        h, w = src.shape[:2]
-        if min(h, w) < 50:
-            return img_obj
-            
-        max_dim = 600
-        scale = 1.0
-        if max(h, w) > max_dim:
-            scale = max_dim / max(h, w)
-            proc_w, proc_h = int(w * scale), int(h * scale)
-            img_proc = cv2.resize(src, (proc_w, proc_h))
+        # 性能平滑优化：如果原图过大，先进行轻量降采样，防止服务器内存爆满崩溃
+        w, h = img_obj.size
+        max_ai_dim = 1024
+        if max(w, h) > max_ai_dim:
+            scale = max_ai_dim / max(w, h)
+            img_for_ai = img_obj.resize((int(w * scale), int(h * scale)), Image.Resampling.BILINEAR)
         else:
-            img_proc = src.copy()
-            proc_w, proc_h = w, h
+            img_for_ai = img_obj
 
-        mask = np.zeros((proc_h, proc_w), np.uint8)
-        rect = (10, 10, proc_w - 20, proc_h - 20)
+        # 调用深度学习模型执行发丝级主体分离
+        output_rgba = remove(img_for_ai, session=bg_session, alpha_matting=True, alpha_matting_foreground_threshold=240, alpha_matting_background_threshold=10)
         
-        bgdModel = np.zeros((1, 65), np.float64)
-        fgdModel = np.zeros((1, 65), np.float64)
-        
-        cv2.grabCut(img_proc[:, :, :3], mask, rect, bgdModel, fgdModel, 3, cv2.GC_INIT_WITH_RECT)
-        
-        bin_mask = np.where((mask == cv2.GC_PR_BGD) | (mask == cv2.GC_BGD), 0, 1).astype('uint8')
-        
-        if scale != 1.0:
-            bin_mask = cv2.resize(bin_mask, (w, h), interpolation=cv2.INTER_LINEAR)
+        # 扣完图后无缝还原至用户原图的分辨率，保证整体高清度不丢失
+        if max(w, h) > max_ai_dim:
+            output_rgba = output_rgba.resize((w, h), Image.Resampling.LANCZOS)
             
-        bin_mask = cv2.GaussianBlur(bin_mask * 255, (5, 5), 0)
-        
-        out_rgba = src.copy()
-        out_rgba[:, :, 3] = np.minimum(out_rgba[:, :, 3], bin_mask)
-        
-        return Image.fromarray(out_rgba)
+        return output_rgba
     except:
         return img_obj
 
@@ -106,8 +96,9 @@ def process_engine(img_input, config, is_preview=False):
 
         img = img.convert("RGBA")
         
+        # 如果用户开启了自动抠图，优先调用 AI 精准抠图
         if config.get('auto_crop', False):
-            img = auto_extract_foreground(img)
+            img = ai_extract_foreground(img)
             
         target_w, target_h = config['size']
         is_transparent_out = (config['bg_mode'] == "特定颜色" and config['pure_color'] == "透明")
@@ -246,7 +237,10 @@ with left_col:
             scale_mode = st.radio("画面填充模式", ["等比完整展示 (留背景)", "居中裁剪铺满 (大图感)"], index=0, key=f"sm_{st.session_state.settings_key}")
 
         with st.expander("视觉设置", expanded=False):
-            auto_crop_mode = st.checkbox("开启智能自动抠图 (智能提取菜品)", value=False, key=f"acrop_{st.session_state.settings_key}")
+            # 如果缺少 rembg 库，前端会给出友好安装提示
+            if not HAS_REMBG:
+                st.warning("提示：未检测到 rembg 库，请在终端执行 pip install rembg 后重启服务以解锁 AI 抠图。")
+            auto_crop_mode = st.checkbox("开启智能自动抠图 (智能提取菜品)", value=False, disabled=not HAS_REMBG, key=f"acrop_{st.session_state.settings_key}")
             
             bg_m = st.selectbox("背景模式", ["深度高斯模糊", "特定颜色", "提取原色"], key=f"bgm_{st.session_state.settings_key}")
             p_color = "白色"
