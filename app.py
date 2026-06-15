@@ -39,7 +39,7 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- 升级：双轨智能色域边缘感知菜品提取算法 ---
+# --- 升级：智能餐盘与食物整体感知提取算法 ---
 def advanced_extract_foreground(img_obj):
     try:
         src = np.array(img_obj)
@@ -50,7 +50,7 @@ def advanced_extract_foreground(img_obj):
         if min(h, w) < 50:
             return img_obj
             
-        # 1. 动态缩放至合理算法特征尺寸
+        # 1. 动态缩放
         max_dim = 600
         scale = max_dim / max(h, w) if max(h, w) > max_dim else 1.0
         if scale != 1.0:
@@ -61,24 +61,25 @@ def advanced_extract_foreground(img_obj):
         proc_h, proc_w = img_proc.shape[:2]
         rgb_proc = img_proc[:, :, :3]
         
-        # 2. 显著性色彩结构提取：利用自适应闭运算连接菜品断开的边缘（如寿司、细碎食材）
+        # 2. 增强餐盘边缘感知
         gray = cv2.cvtColor(rgb_proc, cv2.COLOR_RGB2GRAY)
-        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        # 使用较大的核平滑掉寿司内部的零碎纹理，凸显餐盘整体轮廓
+        blurred = cv2.GaussianBlur(gray, (11, 11), 0)
         
-        # 使用自适应阈值和大津法双轨结合，精确定位菜品盘子的主边缘
-        edges = cv2.Canny(blurred, 20, 120)
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+        # 提取外围大轮廓
+        edges = cv2.Canny(blurred, 15, 70)
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
         closed_edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
         
-        # 3. 智能动态围栏：自动剔除外围人工填充的黑边/白边，精准锁定食物中心
+        # 3. 寻找最大的外接矩形（即餐盘边界）
         pts = np.argwhere(closed_edges > 0)
         if len(pts) > 100:
             min_y, min_x = pts.min(axis=0)
             max_y, max_x = pts.max(axis=0)
             
-            # 给菜品边缘预留舒适的松弛边缘，防止食物贴边被削碎
-            margin_x = int(proc_w * 0.04) + 1
-            margin_y = int(proc_h * 0.04) + 1
+            # 既然要保留餐盘，外扩安全边界（Margin）需要加大，防止切到盘子边角
+            margin_x = int(proc_w * 0.02) + 2
+            margin_y = int(proc_h * 0.02) + 2
             
             bx = max(2, min_x - margin_x)
             by = max(2, min_y - margin_y)
@@ -86,24 +87,23 @@ def advanced_extract_foreground(img_obj):
             bh = min(proc_h - by - 2, (max_y - min_y) + margin_y * 2)
             rect = (bx, by, bw, bh)
         else:
-            # 兜底方案：取中心85%区域
-            rect = (int(proc_w*0.07), int(proc_h*0.07), int(proc_w*0.86), int(proc_h*0.86))
+            rect = (int(proc_w*0.03), int(proc_h*0.03), int(proc_w*0.94), int(proc_h*0.94))
             
-        # 4. 执行多通道矩阵融合抠图
+        # 4. 基于餐盘范围的 GrabCut 矩阵分割
         mask = np.zeros((proc_h, proc_w), np.uint8)
         bgdModel = np.zeros((1, 65), np.float64)
         fgdModel = np.zeros((1, 65), np.float64)
         
-        # 进行迭代优化
-        cv2.grabCut(rgb_proc, mask, rect, bgdModel, fgdModel, 6, cv2.GC_INIT_WITH_RECT)
+        cv2.grabCut(rgb_proc, mask, rect, bgdModel, fgdModel, 7, cv2.GC_INIT_WITH_RECT)
         bin_mask = np.where((mask == cv2.GC_PR_BGD) | (mask == cv2.GC_BGD), 0, 1).astype('uint8')
         
-        # 5. 高阶高斯羽化：让抠出来的菜品边缘极其丝滑，不会有难看的狗牙和硬切边
+        # 5. 恢复尺寸并进行边缘柔化
         if scale != 1.0:
             bin_mask = cv2.resize(bin_mask, (w, h), interpolation=cv2.INTER_LINEAR)
             
         bin_mask_cv = (bin_mask * 255).astype(np.uint8)
-        bin_mask_cv = cv2.GaussianBlur(bin_mask_cv, (11, 11), 0)
+        # 适度羽化，让餐盘外沿融入新背景时看起来更自然
+        bin_mask_cv = cv2.GaussianBlur(bin_mask_cv, (7, 7), 0)
         
         out_rgba = src.copy()
         out_rgba[:, :, 3] = np.minimum(out_rgba[:, :, 3], bin_mask_cv)
@@ -136,7 +136,7 @@ def process_engine(img_input, config, is_preview=False):
 
         img = img.convert("RGBA")
         
-        # 核心逻辑修正：先对上传的原图进行智能抠图分离，再进行大图或留白填充，彻底解决因填充导致背景被污染的问题
+        # 核心逻辑：先完成餐盘级别的智能扣图，再去适应规格
         if config.get('auto_crop', False):
             img = advanced_extract_foreground(img)
             
