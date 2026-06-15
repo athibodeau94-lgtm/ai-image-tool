@@ -29,7 +29,58 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- 3. 四点透视餐盘提取算法 ---
+# --- 3. 核心算法：全自动智能边缘提取 ---
+def auto_detect_plate_pts(img_bytes):
+    """通过OpenCV图像算法，智能自动识别图中的餐盘边缘四点"""
+    try:
+        nparr = np.frombuffer(img_bytes, np.uint8)
+        img_bgr = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if img_bgr is None: return [[5,5], [95,5], [5,95], [95,95]]
+        
+        h, w = img_bgr.shape[:2]
+        gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+        blurred = cv2.GaussianBlur(gray, (7, 7), 0)
+        
+        # 混合阈值检测餐盘边缘
+        edged = cv2.Canny(blurred, 30, 150)
+        contours, _ = cv2.findContours(edged.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        if contours:
+            # 找面积最大的闭合图形（通常是餐盘）
+            c = max(contours, key=cv2.contourArea)
+            peri = cv2.arcLength(c, True)
+            approx = cv2.approxPolyDP(c, 0.02 * peri, True)
+            
+            # 如果成功拟合出四边形
+            if len(approx) == 4:
+                pts = approx.reshape(4, 2)
+            else:
+                # 拟合失败则取最大外接矩形
+                rect = cv2.minAreaRect(c)
+                pts = cv2.boxPoints(rect)
+                
+            # 坐标排序：左上、右上、左下、右下
+            pts = np.array(pts, dtype="float32")
+            sum_pts = pts.sum(axis=1)
+            diff_pts = np.diff(pts, axis=1)
+            
+            p1 = pts[np.argmin(sum_pts)]
+            p4 = pts[np.argmax(sum_pts)]
+            p2 = pts[np.argmin(diff_pts)]
+            p3 = pts[np.argmax(diff_pts)]
+            
+            # 转为百分比返回
+            return [
+                [max(0.0, min(100.0, float(p1[0]/w*100))), max(0.0, min(100.0, float(p1[1]/h*100)))],
+                [max(0.0, min(100.0, float(p2[0]/w*100))), max(0.0, min(100.0, float(p2[1]/h*100)))],
+                [max(0.0, min(100.0, float(p3[0]/w*100))), max(0.0, min(100.0, float(p3[1]/h*100)))],
+                [max(0.0, min(100.0, float(p4[0]/w*100))), max(0.0, min(100.0, float(p4[1]/h*100)))]
+            ]
+    except:
+        pass
+    # 默认兜底：常规长条寿司盘比例
+    return [[1, 9], [98, 2], [11, 83], [99, 68]]
+
 def perspective_crop_plate(img_obj, pts_pct):
     try:
         src = np.array(img_obj)
@@ -163,19 +214,42 @@ with left_col:
             kb = {"不限制": 0, "500KB": 500, "1MB": 1024}.get(vol_opt, 0)
             scale_mode = st.radio("画面填充模式", ["等比完整展示 (留背景)", "居中裁剪铺满 (大图感)"], key=f"s_{st.session_state.settings_key}")
 
-        with st.expander("视觉设置", expanded=True):
-            auto_crop_mode = st.checkbox("开启智能自动抠图 (智能提取菜品)", value=False, key=f"ac_{st.session_state.settings_key}")
+        with st.expander("视觉设置（懒人抠图版）", expanded=True):
+            auto_crop_mode = st.checkbox("开启智能餐盘提取", value=False, key=f"ac_{st.session_state.settings_key}")
             current_pts = None
+            
             if auto_crop_mode:
-                st.markdown("**📌 调节下方滑块，让红框锁制餐盘：**")
-                p1_x = st.slider("左上角 X (%)", 0, 100, 1)
-                p1_y = st.slider("左上角 Y (%)", 0, 100, 9)
-                p2_x = st.slider("右上角 X (%)", 0, 100, 98)
-                p2_y = st.slider("右上角 Y (%)", 0, 100, 2)
-                p3_x = st.slider("左下角 X (%)", 0, 100, 11)
-                p3_y = st.slider("左下角 Y (%)", 0, 100, 83)
-                p4_x = st.slider("右下角 X (%)", 0, 100, 99)
-                p4_y = st.slider("右下角 Y (%)", 0, 100, 68)
+                st.markdown("### 🤖 提取模式选择")
+                # 计算全自动默认值
+                auto_vals = [[1, 9], [98, 2], [11, 83], [99, 68]]
+                if processed_list:
+                    auto_vals = auto_detect_plate_pts(processed_list[0]["content"])
+
+                lazy_mode = st.radio("选择定位方案", ["AI全自动识别", "标准长条寿司盘", "全幅正餐盘(圆/方)", "手动精细调整"], horizontal=True)
+                
+                if lazy_mode == "AI全自动识别":
+                    init_pts = auto_vals
+                elif lazy_mode == "标准长条寿司盘":
+                    init_pts = [[1, 9], [98, 2], [11, 83], [99, 68]]
+                elif lazy_mode == "全幅正餐盘(圆/方)":
+                    init_pts = [[5, 5], [95, 5], [5, 95], [95, 95]]
+                else:
+                    init_pts = auto_vals
+
+                # 极简滑块合并展开
+                with st.expander("🛠️ 微调边缘 (非必填)", expanded=(lazy_mode == "手动精细调整")):
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        p1_x = st.slider("左上 X", 0, 100, int(init_pts[0][0]))
+                        p1_y = st.slider("左上 Y", 0, 100, int(init_pts[0][1]))
+                        p3_x = st.slider("左下 X", 0, 100, int(init_pts[2][0]))
+                        p3_y = st.slider("左下 Y", 0, 100, int(init_pts[2][1]))
+                    with c2:
+                        p2_x = st.slider("右上 X", 0, 100, int(init_pts[1][0]))
+                        p2_y = st.slider("右上 Y", 0, 100, int(init_pts[1][1]))
+                        p4_x = st.slider("右下 X", 0, 100, int(init_pts[3][0]))
+                        p4_y = st.slider("右下 Y", 0, 100, int(init_pts[3][1]))
+                
                 current_pts = [(p1_x, p1_y), (p2_x, p2_y), (p3_x, p3_y), (p4_x, p4_y)]
                 
                 if processed_list:
@@ -184,7 +258,7 @@ with left_col:
                         rw, rh = ref_img.size
                         draw = ImageDraw.Draw(ref_img)
                         draw.polygon([(p1_x*rw/100, p1_y*rh/100), (p2_x*rw/100, p2_y*rh/100), (p4_x*rw/100, p4_y*rh/100), (p3_x*rw/100, p3_y*rh/100)], outline="red", width=4)
-                        st.image(ref_img, use_container_width=True, caption="🔴 红框内为保留区域")
+                        st.image(ref_img, use_container_width=True, caption="🔴 锁定区域预览")
                     except: pass
 
             bg_m = st.selectbox("背景模式", ["特定颜色", "深度高斯模糊", "提取原色"], key=f"b_{st.session_state.settings_key}")
