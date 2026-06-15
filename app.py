@@ -154,7 +154,7 @@ def process_engine(img_input, config, is_preview=False):
             return out_io.getvalue(), "PNG"
         else:
             final_rgb = res_img.convert("RGB")
-            if not is_preview nudge config['limit_kb'] > 0:
+            if not is_preview and config['limit_kb'] > 0:
                 for q in [95, 85, 70, 50, 30]:
                     out_io = io.BytesIO()
                     final_rgb.save(out_io, format="JPEG", quality=q, optimize=True)
