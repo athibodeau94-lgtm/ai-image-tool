@@ -24,8 +24,6 @@ st.markdown("""
     <style>
     header {visibility: hidden;}
     .block-container {padding-top: 2rem !important;}
-    
-    /* 为预览图区域注入标准的电商透明棋盘格 */
     .stImage > img { 
         border-radius: 4px; 
         object-fit: contain; 
@@ -39,7 +37,7 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- 升级：智能餐盘与食物整体感知提取算法 ---
+# --- 3. 核心：智能餐盘边界提取算法 ---
 def advanced_extract_foreground(img_obj):
     try:
         src = np.array(img_obj)
@@ -50,7 +48,6 @@ def advanced_extract_foreground(img_obj):
         if min(h, w) < 50:
             return img_obj
             
-        # 1. 动态缩放
         max_dim = 600
         scale = max_dim / max(h, w) if max(h, w) > max_dim else 1.0
         if scale != 1.0:
@@ -61,25 +58,21 @@ def advanced_extract_foreground(img_obj):
         proc_h, proc_w = img_proc.shape[:2]
         rgb_proc = img_proc[:, :, :3]
         
-        # 2. 增强餐盘边缘感知
+        # 提取餐盘整体大轮廓，滤除寿司碎屑干扰
         gray = cv2.cvtColor(rgb_proc, cv2.COLOR_RGB2GRAY)
-        # 使用较大的核平滑掉寿司内部的零碎纹理，凸显餐盘整体轮廓
         blurred = cv2.GaussianBlur(gray, (11, 11), 0)
-        
-        # 提取外围大轮廓
         edges = cv2.Canny(blurred, 15, 70)
+        
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
         closed_edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
         
-        # 3. 寻找最大的外接矩形（即餐盘边界）
         pts = np.argwhere(closed_edges > 0)
         if len(pts) > 100:
             min_y, min_x = pts.min(axis=0)
             max_y, max_x = pts.max(axis=0)
             
-            # 既然要保留餐盘，外扩安全边界（Margin）需要加大，防止切到盘子边角
-            margin_x = int(proc_w * 0.02) + 2
-            margin_y = int(proc_h * 0.02) + 2
+            margin_x = int(proc_w * 0.03) + 2
+            margin_y = int(proc_h * 0.03) + 2
             
             bx = max(2, min_x - margin_x)
             by = max(2, min_y - margin_y)
@@ -89,7 +82,6 @@ def advanced_extract_foreground(img_obj):
         else:
             rect = (int(proc_w*0.03), int(proc_h*0.03), int(proc_w*0.94), int(proc_h*0.94))
             
-        # 4. 基于餐盘范围的 GrabCut 矩阵分割
         mask = np.zeros((proc_h, proc_w), np.uint8)
         bgdModel = np.zeros((1, 65), np.float64)
         fgdModel = np.zeros((1, 65), np.float64)
@@ -97,12 +89,10 @@ def advanced_extract_foreground(img_obj):
         cv2.grabCut(rgb_proc, mask, rect, bgdModel, fgdModel, 7, cv2.GC_INIT_WITH_RECT)
         bin_mask = np.where((mask == cv2.GC_PR_BGD) | (mask == cv2.GC_BGD), 0, 1).astype('uint8')
         
-        # 5. 恢复尺寸并进行边缘柔化
         if scale != 1.0:
             bin_mask = cv2.resize(bin_mask, (w, h), interpolation=cv2.INTER_LINEAR)
             
         bin_mask_cv = (bin_mask * 255).astype(np.uint8)
-        # 适度羽化，让餐盘外沿融入新背景时看起来更自然
         bin_mask_cv = cv2.GaussianBlur(bin_mask_cv, (7, 7), 0)
         
         out_rgba = src.copy()
@@ -112,7 +102,6 @@ def advanced_extract_foreground(img_obj):
     except:
         return img_obj
 
-# --- PDF 低清小图智能高清重构算法 ---
 def super_resolve_and_sharpen(img_obj):
     w, h = img_obj.size
     if w < 1000 or h < 1000:
@@ -124,7 +113,7 @@ def super_resolve_and_sharpen(img_obj):
     img_obj = ImageEnhance.Sharpness(img_obj).enhance(1.4)
     return img_obj
 
-# --- 3. 高性能核心引擎 ---
+# --- 4. 核心图像转码引擎 ---
 def process_engine(img_input, config, is_preview=False):
     try:
         if isinstance(img_input, (bytes, io.BytesIO)):
@@ -136,7 +125,6 @@ def process_engine(img_input, config, is_preview=False):
 
         img = img.convert("RGBA")
         
-        # 核心逻辑：先完成餐盘级别的智能扣图，再去适应规格
         if config.get('auto_crop', False):
             img = advanced_extract_foreground(img)
             
@@ -197,7 +185,7 @@ def process_engine(img_input, config, is_preview=False):
     except:
         return None, "Error"
 
-# --- 4. 界面布局 ---
+# --- 5. Streamlit 前端交互 ---
 left_col, right_col = st.columns([1.1, 2.5], gap="large")
 
 with left_col:
@@ -222,27 +210,18 @@ with left_col:
         elif pdf_files:
             pdf_file = pdf_files[0]
             zip_prefix = os.path.splitext(pdf_file.name)[0]
-            
             doc = fitz.open(stream=pdf_file.getvalue(), filetype="pdf")
             img_idx = 1
-            
             for page_num in range(len(doc)):
                 page = doc[page_num]
                 for img_info in page.get_images(full=True):
                     xref = img_info[0]
                     base_image = doc.extract_image(xref)
-                    
-                    img_bytes = base_image["image"]
-                    img_ext = base_image["ext"]
-                    
-                    raw_pil = Image.open(io.BytesIO(img_bytes))
+                    raw_pil = Image.open(io.BytesIO(base_image["image"]))
                     hd_pil = super_resolve_and_sharpen(raw_pil)
-                    
                     hd_io = io.BytesIO()
-                    hd_pil.save(hd_io, format="PNG" if img_ext.lower() == "png" else "JPEG")
-                    
-                    fake_name = f"pdf_img_{img_idx}.{img_ext}"
-                    processed_list.append({"name": fake_name, "content": hd_io.getvalue()})
+                    hd_pil.save(hd_io, format="JPEG")
+                    processed_list.append({"name": f"pdf_img_{img_idx}.jpg", "content": hd_io.getvalue()})
                     img_idx += 1
         else:
             zip_prefix = datetime.now().strftime("%m%d")
@@ -260,7 +239,6 @@ with left_col:
                 "自定义尺寸": "custom"
             }
             res_label = st.selectbox("比例预设", list(res_map.keys()), key=f"res_{st.session_state.settings_key}")
-            
             vol_default_idx = 1 if res_label != "请选择..." else 0
             
             if res_label == "自定义尺寸":
@@ -278,7 +256,6 @@ with left_col:
 
         with st.expander("视觉设置", expanded=False):
             auto_crop_mode = st.checkbox("开启智能自动抠图 (智能提取菜品)", value=False, key=f"acrop_{st.session_state.settings_key}")
-            
             bg_m = st.selectbox("背景模式", ["深度高斯模糊", "特定颜色", "提取原色"], key=f"bgm_{st.session_state.settings_key}")
             p_color = "白色"
             if bg_m == "特定颜色":
