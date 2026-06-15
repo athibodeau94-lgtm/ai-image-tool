@@ -1,5 +1,5 @@
 import streamlit as st
-from PIL import Image, ImageEnhance, ImageFilter, ImageOps, ImageDraw
+from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 import io
 import zipfile
 import os
@@ -9,7 +9,7 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 import fitz
 
-# --- 1. 页面配置 ---
+# --- 1. 页面配置与状态初始化 ---
 st.set_page_config(page_title="餐影工坊", layout="wide")
 
 if 'settings_key' not in st.session_state:
@@ -37,68 +37,43 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- 3. 核心：智能餐盘边界提取算法 ---
-def advanced_extract_foreground(img_obj):
+# --- 3. 核心：四点透视餐盘提取算法 ---
+def perspective_crop_plate(img_obj, pts_pct):
     try:
         src = np.array(img_obj)
         if src.shape[2] < 4:
             src = cv2.cvtColor(src, cv2.COLOR_RGB2RGBA)
-            
         h, w = src.shape[:2]
-        if min(h, w) < 50:
-            return img_obj
-            
-        max_dim = 600
-        scale = max_dim / max(h, w) if max(h, w) > max_dim else 1.0
-        if scale != 1.0:
-            img_proc = cv2.resize(src, (int(w * scale), int(h * scale)))
-        else:
-            img_proc = src.copy()
         
-        proc_h, proc_w = img_proc.shape[:2]
-        rgb_proc = img_proc[:, :, :3]
+        # 将百分比坐标还原为真实像素坐标
+        src_pts = np.array([
+            [pts_pct[0][0] * w / 100.0, pts_pct[0][1] * h / 100.0],
+            [pts_pct[1][0] * w / 100.0, pts_pct[1][1] * h / 100.0],
+            [pts_pct[2][0] * w / 100.0, pts_pct[2][1] * h / 100.0],
+            [pts_pct[3][0] * w / 100.0, pts_pct[3][1] * h / 100.0]
+        ], dtype=np.float32)
         
-        # 提取餐盘整体大轮廓，滤除寿司碎屑干扰
-        gray = cv2.cvtColor(rgb_proc, cv2.COLOR_RGB2GRAY)
-        blurred = cv2.GaussianBlur(gray, (11, 11), 0)
-        edges = cv2.Canny(blurred, 15, 70)
+        # 计算餐盘目标摆正后的新宽高
+        width_a = np.sqrt(((src_pts[2][0] - src_pts[3][0]) ** 2) + ((src_pts[2][1] - src_pts[3][1]) ** 2))
+        width_b = np.sqrt(((src_pts[1][0] - src_pts[0][0]) ** 2) + ((src_pts[1][1] - src_pts[0][1]) ** 2))
+        max_width = max(int(width_a), int(width_b))
+
+        height_a = np.sqrt(((src_pts[1][0] - src_pts[3][0]) ** 2) + ((src_pts[1][1] - src_pts[3][1]) ** 2))
+        height_b = np.sqrt(((src_pts[0][0] - src_pts[2][0]) ** 2) + ((src_pts[0][1] - src_pts[2][1]) ** 2))
+        max_height = max(int(height_a), int(height_b))
         
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
-        closed_edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
+        dst_pts = np.array([
+            [0, 0],
+            [max_width - 1, 0],
+            [0, max_height - 1],
+            [max_width - 1, max_height - 1]
+        ], dtype=np.float32)
         
-        pts = np.argwhere(closed_edges > 0)
-        if len(pts) > 100:
-            min_y, min_x = pts.min(axis=0)
-            max_y, max_x = pts.max(axis=0)
-            
-            margin_x = int(proc_w * 0.03) + 2
-            margin_y = int(proc_h * 0.03) + 2
-            
-            bx = max(2, min_x - margin_x)
-            by = max(2, min_y - margin_y)
-            bw = min(proc_w - bx - 2, (max_x - min_x) + margin_x * 2)
-            bh = min(proc_h - by - 2, (max_y - min_y) + margin_y * 2)
-            rect = (bx, by, bw, bh)
-        else:
-            rect = (int(proc_w*0.03), int(proc_h*0.03), int(proc_w*0.94), int(proc_h*0.94))
-            
-        mask = np.zeros((proc_h, proc_w), np.uint8)
-        bgdModel = np.zeros((1, 65), np.float64)
-        fgdModel = np.zeros((1, 65), np.float64)
+        # 进行透视变换
+        m = cv2.getPerspectiveTransform(src_pts, dst_pts)
+        warped = cv2.warpPerspective(src, m, (max_width, max_height))
         
-        cv2.grabCut(rgb_proc, mask, rect, bgdModel, fgdModel, 7, cv2.GC_INIT_WITH_RECT)
-        bin_mask = np.where((mask == cv2.GC_PR_BGD) | (mask == cv2.GC_BGD), 0, 1).astype('uint8')
-        
-        if scale != 1.0:
-            bin_mask = cv2.resize(bin_mask, (w, h), interpolation=cv2.INTER_LINEAR)
-            
-        bin_mask_cv = (bin_mask * 255).astype(np.uint8)
-        bin_mask_cv = cv2.GaussianBlur(bin_mask_cv, (7, 7), 0)
-        
-        out_rgba = src.copy()
-        out_rgba[:, :, 3] = np.minimum(out_rgba[:, :, 3], bin_mask_cv)
-        
-        return Image.fromarray(out_rgba)
+        return Image.fromarray(warped)
     except:
         return img_obj
 
@@ -108,16 +83,14 @@ def super_resolve_and_sharpen(img_obj):
         scale_factor = 2 if max(w, h) > 500 else 3
         new_w, new_h = int(w * scale_factor), int(h * scale_factor)
         img_obj = img_obj.resize((new_w, new_h), Image.Resampling.LANCZOS)
-        
     img_obj = img_obj.filter(ImageFilter.EDGE_ENHANCE)
-    img_obj = ImageEnhance.Sharpness(img_obj).enhance(1.4)
-    return img_obj
+    return ImageEnhance.Sharpness(img_obj).enhance(1.4)
 
-# --- 4. 核心图像转码引擎 ---
-def process_engine(img_input, config, is_preview=False):
+# --- 4. 转码渲染引擎 ---
+def process_engine(img_input, config, pts_pct=None):
     try:
         if isinstance(img_input, (bytes, io.BytesIO)):
-            img = Image.open(io.BytesIO(img_input if isinstance(img_input, bytes) else img_input.getvalue()))
+            img = Image.open(io.BytesIO(img_input if isinstance(bytes, bytes) else img_input.getvalue()))
         elif hasattr(img_input, 'getvalue'):
             img = Image.open(io.BytesIO(img_input.getvalue()))
         else:
@@ -125,8 +98,9 @@ def process_engine(img_input, config, is_preview=False):
 
         img = img.convert("RGBA")
         
-        if config.get('auto_crop', False):
-            img = advanced_extract_foreground(img)
+        # 核心改动：如果开启自动抠图且有4点坐标，直接执行餐盘精准切边
+        if config.get('auto_crop', False) and pts_pct is not None:
+            img = perspective_crop_plate(img, pts_pct)
             
         target_w, target_h = config['size']
         is_transparent_out = (config['bg_mode'] == "特定颜色" and config['pure_color'] == "透明")
@@ -139,13 +113,6 @@ def process_engine(img_input, config, is_preview=False):
             new_size = (int(original_w * ratio), int(original_h * ratio))
             img_resized = img.resize(new_size, Image.Resampling.LANCZOS)
             
-            if config['bg_mode'] in ["深度高斯模糊", "提取原色"] and not is_transparent_out:
-                mask = Image.new("L", new_size, 255)
-                draw = ImageDraw.Draw(mask)
-                draw.rectangle([0, 0, new_size[0], new_size[1]], outline=0, width=2)
-                mask = mask.filter(ImageFilter.GaussianBlur(radius=3)) 
-                img_resized.putalpha(mask)
-
             if is_transparent_out:
                 bg = Image.new("RGBA", (target_w, target_h), (0, 0, 0, 0))
             elif config['bg_mode'] == "深度高斯模糊":
@@ -167,26 +134,18 @@ def process_engine(img_input, config, is_preview=False):
         res_img = ImageEnhance.Sharpness(res_img).enhance(config['sharp'])
 
         out_io = io.BytesIO()
-        
         if is_transparent_out:
             res_img.save(out_io, format="PNG")
             return out_io.getvalue(), "PNG"
         else:
             final_rgb = res_img.convert("RGB")
-            if not is_preview and config['limit_kb'] > 0:
-                for q in [95, 85, 70, 50, 30]:
-                    out_io = io.BytesIO()
-                    final_rgb.save(out_io, format="JPEG", quality=q, optimize=True)
-                    if out_io.tell() <= config['limit_kb'] * 1024:
-                        break
-            else:
-                final_rgb.save(out_io, format="JPEG", quality=95, optimize=True)
+            final_rgb.save(out_io, format="JPEG", quality=95, optimize=True)
             return out_io.getvalue(), "JPEG"
     except:
         return None, "Error"
 
-# --- 5. Streamlit 前端交互 ---
-left_col, right_col = st.columns([1.1, 2.5], gap="large")
+# --- 5. Streamlit 主交互界面 ---
+left_col, right_col = st.columns([1.2, 2.4], gap="large")
 
 with left_col:
     st.subheader("导入中心")
@@ -206,7 +165,6 @@ with left_col:
                     if filename.lower().endswith(('.png', '.jpg', '.jpeg')) and not filename.startswith('__MACOSX'):
                         with z.open(filename) as img_f:
                             processed_list.append({"name": os.path.basename(filename), "content": img_f.read()})
-                            
         elif pdf_files:
             pdf_file = pdf_files[0]
             zip_prefix = os.path.splitext(pdf_file.name)[0]
@@ -235,7 +193,6 @@ with left_col:
                 "聚合标准 (1920*1080)": "1920*1080", 
                 "Kiosk/Emenu标准 (5:3)": "1000*600", 
                 "封面图 (1080*1250)": "1080*1250",
-                "屏保 (1080*1920)": "1080*1920",
                 "自定义尺寸": "custom"
             }
             res_label = st.selectbox("比例预设", list(res_map.keys()), key=f"res_{st.session_state.settings_key}")
@@ -250,20 +207,38 @@ with left_col:
                 tw, th = (1920, 1080) if raw_val == "none" else map(int, raw_val.split('*'))
                 dim_name = "5-3" if "5:3" in res_label else raw_val.replace("*", "-")
 
-            vol_opt = st.selectbox("体积控制", ["不限制", "500KB", "1MB", "自定义"], index=vol_default_idx, key=f"vol_{st.session_state.settings_key}")
+            vol_opt = st.selectbox("体积控制", ["不限制", "500KB", "1MB"], index=vol_default_idx, key=f"vol_{st.session_state.settings_key}")
             kb = {"不限制": 0, "500KB": 500, "1MB": 1024}.get(vol_opt, 0)
             scale_mode = st.radio("画面填充模式", ["等比完整展示 (留背景)", "居中裁剪铺满 (大图感)"], index=0, key=f"sm_{st.session_state.settings_key}")
 
-        with st.expander("视觉设置", expanded=False):
+        with st.expander("视觉设置", expanded=True):
             auto_crop_mode = st.checkbox("开启智能自动抠图 (智能提取菜品)", value=False, key=f"acrop_{st.session_state.settings_key}")
-            bg_m = st.selectbox("背景模式", ["深度高斯模糊", "特定颜色", "提取原色"], key=f"bgm_{st.session_state.settings_key}")
+            
+            # 当开启智能抠图时，允许用户直接通过百分比滑块定义餐盘的 4 个顶角
+            if auto_crop_mode:
+                st.markdown("**📌 请微调下方滑块，使选择框完美锁定制餐盘的四个角：**")
+                col_pt1, col_pt2 = st.columns(2)
+                with col_pt1:
+                    p1_x = st.slider("左上角 X (%)", 0, 50, 2, key="p1x")
+                    p1_y = st.slider("左上角 Y (%)", 0, 50, 5, key="p1y")
+                    p3_x = st.slider("左下角 X (%)", 0, 50, 2, key="p3x")
+                    p3_y = st.slider("左下角 Y (%)", 50, 100, 95, key="p3y")
+                with col_pt2:
+                    p2_x = st.slider("右上角 X (%)", 50, 100, 98, key="p2x")
+                    p2_y = st.slider("右上角 Y (%)", 0, 50, 2, key="p2y")
+                    p4_x = st.slider("右下角 X (%)", 50, 100, 98, key="p4x")
+                    p4_y = st.slider("右下角 Y (%)", 50, 100, 80, key="p4y")
+                current_pts = [(p1_x, p1_y), (p2_x, p2_y), (p3_x, p3_y), (p4_x, p4_y)]
+            else:
+                current_pts = None
+
+            bg_m = st.selectbox("背景模式", ["特定颜色", "深度高斯模糊", "提取原色"], key=f"bgm_{st.session_state.settings_key}")
             p_color = "白色"
             if bg_m == "特定颜色":
                 p_color = st.selectbox("底色选择", ["白色", "黑色", "灰色", "透明"], key=f"pcol_{st.session_state.settings_key}")
             b_radius = st.slider("模糊强度", 0, 200, 70, key=f"brad_{st.session_state.settings_key}")
-            flt = st.selectbox("滤镜效果", ["原色", "暖色调", "清爽调"], key=f"flt_{st.session_state.settings_key}")
             br = st.slider("亮度", 0.5, 1.5, 1.0, key=f"br_{st.session_state.settings_key}")
-            sh = st.slider("锐化", 1.0, 4.0, 1.5, key=f"sh_{st.session_state.settings_key}")
+            sh = st.slider("锐化", 1.0, 4.0, 1.3, key=f"sh_{st.session_state.settings_key}")
 
     st.write("---")
     if st.button("重置所有设置", use_container_width=True):
@@ -274,31 +249,30 @@ with right_col:
     if processed_list:
         conf = {
             'size': (tw, th), 'limit_kb': kb, 'bg_mode': bg_m, 'pure_color': p_color, 
-            'blur_radius': b_radius, 'filter': flt, 'bright': br, 'sharp': sh, 
+            'blur_radius': b_radius, 'bright': br, 'sharp': sh, 
             'scale_mode': scale_mode, 'auto_crop': auto_crop_mode
         }
         
         final_outputs = []
-        with st.spinner("多线程图像并行洗图转码中..."):
+        with st.spinner("并行洗图转码中..."):
             with ThreadPoolExecutor() as executor:
-                futures = [executor.submit(process_engine, item["content"], conf, is_preview=False) for item in processed_list]
+                futures = [executor.submit(process_engine, item["content"], conf, current_pts) for item in processed_list]
                 final_outputs = [f.result() for f in futures]
         
-        with st.container(height=450):
-            cols = st.columns(3)
+        with st.container(height=480):
+            cols = st.columns(2)
             for idx, item in enumerate(processed_list):
-                with cols[idx % 3]:
+                with cols[idx % 2]:
                     p_bytes, _ = final_outputs[idx]
                     if p_bytes: 
                         st.image(p_bytes, use_container_width=True, caption=item["name"])
 
         st.write("---")
-
         if len(processed_list) == 1:
             data, ext = final_outputs[0]
             if data:
                 orig_name = os.path.splitext(processed_list[0]["name"])[0]
-                st.download_button(f"下载处理后的图片: {processed_list[0]['name']}", data=data, file_name=f"{orig_name}.{ext.lower()}", type="primary", use_container_width=True)
+                st.download_button(f"下载处理后的图片", data=data, file_name=f"{orig_name}.{ext.lower()}", type="primary", use_container_width=True)
         else:
             final_zip_name = f"{zip_prefix}-{dim_name}.zip"
             zip_buf = io.BytesIO()
@@ -308,13 +282,6 @@ with right_col:
                     if data:
                         name_only = os.path.splitext(item["name"])[0]
                         zf.writestr(f"{name_only}.{ext.lower()}", data)
-            
-            st.download_button(
-                label=f"立即打包下载 ({len(processed_list)}张)", 
-                data=zip_buf.getvalue(), 
-                file_name=final_zip_name, 
-                type="primary", 
-                use_container_width=True
-            )
+            st.download_button(label=f"立即打包下载 ({len(processed_list)}张)", data=zip_buf.getvalue(), file_name=final_zip_name, type="primary", use_container_width=True)
     else:
         st.info("请在左侧上传区域开始工作。")
