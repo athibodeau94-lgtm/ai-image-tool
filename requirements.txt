@@ -4,3 +4,4 @@ numpy
 opencv-python-headless
 pdf2image
 PyMuPDF
+pip install rembg pillow-heif
