@@ -1,8 +1,10 @@
 import streamlit as st
-from PIL import Image, ImageEnhance, ImageFilter, ImageOps
+from PIL import Image, ImageEnhance, ImageFilter, ImageOps, ImageDraw
 import io
 import zipfile
 import os
+import numpy as np
+import cv2
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 import fitz
@@ -23,6 +25,7 @@ st.markdown("""
     header {visibility: hidden;}
     .block-container {padding-top: 2rem !important;}
     
+    /* 为预览图区域注入标准的电商透明棋盘格 */
     .stImage > img { 
         border-radius: 4px; 
         object-fit: contain; 
@@ -36,6 +39,79 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
+# --- 升级：双轨智能色域边缘感知菜品提取算法 ---
+def advanced_extract_foreground(img_obj):
+    try:
+        src = np.array(img_obj)
+        if src.shape[2] < 4:
+            src = cv2.cvtColor(src, cv2.COLOR_RGB2RGBA)
+            
+        h, w = src.shape[:2]
+        if min(h, w) < 50:
+            return img_obj
+            
+        # 1. 动态缩放至合理算法特征尺寸
+        max_dim = 600
+        scale = max_dim / max(h, w) if max(h, w) > max_dim else 1.0
+        if scale != 1.0:
+            img_proc = cv2.resize(src, (int(w * scale), int(h * scale)))
+        else:
+            img_proc = src.copy()
+        
+        proc_h, proc_w = img_proc.shape[:2]
+        rgb_proc = img_proc[:, :, :3]
+        
+        # 2. 显著性色彩结构提取：利用自适应闭运算连接菜品断开的边缘（如寿司、细碎食材）
+        gray = cv2.cvtColor(rgb_proc, cv2.COLOR_RGB2GRAY)
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        
+        # 使用自适应阈值和大津法双轨结合，精确定位菜品盘子的主边缘
+        edges = cv2.Canny(blurred, 20, 120)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+        closed_edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
+        
+        # 3. 智能动态围栏：自动剔除外围人工填充的黑边/白边，精准锁定食物中心
+        pts = np.argwhere(closed_edges > 0)
+        if len(pts) > 100:
+            min_y, min_x = pts.min(axis=0)
+            max_y, max_x = pts.max(axis=0)
+            
+            # 给菜品边缘预留舒适的松弛边缘，防止食物贴边被削碎
+            margin_x = int(proc_w * 0.04) + 1
+            margin_y = int(proc_h * 0.04) + 1
+            
+            bx = max(2, min_x - margin_x)
+            by = max(2, min_y - margin_y)
+            bw = min(proc_w - bx - 2, (max_x - min_x) + margin_x * 2)
+            bh = min(proc_h - by - 2, (max_y - min_y) + margin_y * 2)
+            rect = (bx, by, bw, bh)
+        else:
+            # 兜底方案：取中心85%区域
+            rect = (int(proc_w*0.07), int(proc_h*0.07), int(proc_w*0.86), int(proc_h*0.86))
+            
+        # 4. 执行多通道矩阵融合抠图
+        mask = np.zeros((proc_h, proc_w), np.uint8)
+        bgdModel = np.zeros((1, 65), np.float64)
+        fgdModel = np.zeros((1, 65), np.float64)
+        
+        # 进行迭代优化
+        cv2.grabCut(rgb_proc, mask, rect, bgdModel, fgdModel, 6, cv2.GC_INIT_WITH_RECT)
+        bin_mask = np.where((mask == cv2.GC_PR_BGD) | (mask == cv2.GC_BGD), 0, 1).astype('uint8')
+        
+        # 5. 高阶高斯羽化：让抠出来的菜品边缘极其丝滑，不会有难看的狗牙和硬切边
+        if scale != 1.0:
+            bin_mask = cv2.resize(bin_mask, (w, h), interpolation=cv2.INTER_LINEAR)
+            
+        bin_mask_cv = (bin_mask * 255).astype(np.uint8)
+        bin_mask_cv = cv2.GaussianBlur(bin_mask_cv, (11, 11), 0)
+        
+        out_rgba = src.copy()
+        out_rgba[:, :, 3] = np.minimum(out_rgba[:, :, 3], bin_mask_cv)
+        
+        return Image.fromarray(out_rgba)
+    except:
+        return img_obj
+
 # --- PDF 低清小图智能高清重构算法 ---
 def super_resolve_and_sharpen(img_obj):
     w, h = img_obj.size
@@ -48,7 +124,7 @@ def super_resolve_and_sharpen(img_obj):
     img_obj = ImageEnhance.Sharpness(img_obj).enhance(1.4)
     return img_obj
 
-# --- 3. 高性能纯净转码引擎 ---
+# --- 3. 高性能核心引擎 ---
 def process_engine(img_input, config, is_preview=False):
     try:
         if isinstance(img_input, (bytes, io.BytesIO)):
@@ -59,6 +135,10 @@ def process_engine(img_input, config, is_preview=False):
             img = img_input
 
         img = img.convert("RGBA")
+        
+        # 核心逻辑修正：先对上传的原图进行智能抠图分离，再进行大图或留白填充，彻底解决因填充导致背景被污染的问题
+        if config.get('auto_crop', False):
+            img = advanced_extract_foreground(img)
             
         target_w, target_h = config['size']
         is_transparent_out = (config['bg_mode'] == "特定颜色" and config['pure_color'] == "透明")
@@ -71,6 +151,13 @@ def process_engine(img_input, config, is_preview=False):
             new_size = (int(original_w * ratio), int(original_h * ratio))
             img_resized = img.resize(new_size, Image.Resampling.LANCZOS)
             
+            if config['bg_mode'] in ["深度高斯模糊", "提取原色"] and not is_transparent_out:
+                mask = Image.new("L", new_size, 255)
+                draw = ImageDraw.Draw(mask)
+                draw.rectangle([0, 0, new_size[0], new_size[1]], outline=0, width=2)
+                mask = mask.filter(ImageFilter.GaussianBlur(radius=3)) 
+                img_resized.putalpha(mask)
+
             if is_transparent_out:
                 bg = Image.new("RGBA", (target_w, target_h), (0, 0, 0, 0))
             elif config['bg_mode'] == "深度高斯模糊":
@@ -88,7 +175,6 @@ def process_engine(img_input, config, is_preview=False):
             bg.alpha_composite(img_resized, ((target_w - img_resized.size[0]) // 2, (target_h - img_resized.size[1]) // 2))
             res_img = bg
 
-        # 画面细节与曝光优化
         res_img = ImageEnhance.Brightness(res_img).enhance(config['bright'])
         res_img = ImageEnhance.Sharpness(res_img).enhance(config['sharp'])
 
@@ -116,7 +202,7 @@ left_col, right_col = st.columns([1.1, 2.5], gap="large")
 
 with left_col:
     st.subheader("导入中心")
-    raw_uploads = st.file_uploader("支持多选图片、ZIP包或PDF文档", type=['jpg','jpeg','png','pdf','zip'], accept_multiple_files=True)
+    raw_uploads = st.file_uploader("支持拖入文件夹、ZIP包、PDF文档或多选图片", type=['jpg','jpeg','png','pdf','zip'], accept_multiple_files=True)
     
     processed_list = []
     zip_prefix = ""
@@ -186,18 +272,21 @@ with left_col:
                 tw, th = (1920, 1080) if raw_val == "none" else map(int, raw_val.split('*'))
                 dim_name = "5-3" if "5:3" in res_label else raw_val.replace("*", "-")
 
-            vol_opt = st.selectbox("体积控制", ["不限制", "500KB", "1MB"], index=vol_default_idx, key=f"vol_{st.session_state.settings_key}")
+            vol_opt = st.selectbox("体积控制", ["不限制", "500KB", "1MB", "自定义"], index=vol_default_idx, key=f"vol_{st.session_state.settings_key}")
             kb = {"不限制": 0, "500KB": 500, "1MB": 1024}.get(vol_opt, 0)
             scale_mode = st.radio("画面填充模式", ["等比完整展示 (留背景)", "居中裁剪铺满 (大图感)"], index=0, key=f"sm_{st.session_state.settings_key}")
 
-        with st.expander("视觉优化设置", expanded=True):
-            bg_m = st.selectbox("背景展示模式", ["深度高斯模糊", "特定颜色", "提取原色"], key=f"bgm_{st.session_state.settings_key}")
+        with st.expander("视觉设置", expanded=False):
+            auto_crop_mode = st.checkbox("开启智能自动抠图 (智能提取菜品)", value=False, key=f"acrop_{st.session_state.settings_key}")
+            
+            bg_m = st.selectbox("背景模式", ["深度高斯模糊", "特定颜色", "提取原色"], key=f"bgm_{st.session_state.settings_key}")
             p_color = "白色"
             if bg_m == "特定颜色":
                 p_color = st.selectbox("底色选择", ["白色", "黑色", "灰色", "透明"], key=f"pcol_{st.session_state.settings_key}")
-            b_radius = st.slider("高斯模糊强度", 0, 200, 70, key=f"brad_{st.session_state.settings_key}")
-            br = st.slider("整体画面亮度", 0.5, 1.5, 1.0, key=f"br_{st.session_state.settings_key}")
-            sh = st.slider("高级质感锐化", 1.0, 4.0, 1.5, key=f"sh_{st.session_state.settings_key}")
+            b_radius = st.slider("模糊强度", 0, 200, 70, key=f"brad_{st.session_state.settings_key}")
+            flt = st.selectbox("滤镜效果", ["原色", "暖色调", "清爽调"], key=f"flt_{st.session_state.settings_key}")
+            br = st.slider("亮度", 0.5, 1.5, 1.0, key=f"br_{st.session_state.settings_key}")
+            sh = st.slider("锐化", 1.0, 4.0, 1.5, key=f"sh_{st.session_state.settings_key}")
 
     st.write("---")
     if st.button("重置所有设置", use_container_width=True):
@@ -208,11 +297,12 @@ with right_col:
     if processed_list:
         conf = {
             'size': (tw, th), 'limit_kb': kb, 'bg_mode': bg_m, 'pure_color': p_color, 
-            'blur_radius': b_radius, 'bright': br, 'sharp': sh, 'scale_mode': scale_mode
+            'blur_radius': b_radius, 'filter': flt, 'bright': br, 'sharp': sh, 
+            'scale_mode': scale_mode, 'auto_crop': auto_crop_mode
         }
         
         final_outputs = []
-        with st.spinner("多线程并行图像清洗中..."):
+        with st.spinner("多线程图像并行洗图转码中..."):
             with ThreadPoolExecutor() as executor:
                 futures = [executor.submit(process_engine, item["content"], conf, is_preview=False) for item in processed_list]
                 final_outputs = [f.result() for f in futures]
@@ -231,6 +321,23 @@ with right_col:
             data, ext = final_outputs[0]
             if data:
                 orig_name = os.path.splitext(processed_list[0]["name"])[0]
-                st.download_button(f"下载已处理图片", data=data, file_name=f"{orig_name}.{ext.lower()}", type="primary", use_container_width=True)
+                st.download_button(f"下载处理后的图片: {processed_list[0]['name']}", data=data, file_name=f"{orig_name}.{ext.lower()}", type="primary", use_container_width=True)
         else:
-            final_zip_name = f
+            final_zip_name = f"{zip_prefix}-{dim_name}.zip"
+            zip_buf = io.BytesIO()
+            with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+                for idx, item in enumerate(processed_list):
+                    data, ext = final_outputs[idx]
+                    if data:
+                        name_only = os.path.splitext(item["name"])[0]
+                        zf.writestr(f"{name_only}.{ext.lower()}", data)
+            
+            st.download_button(
+                label=f"立即打包下载 ({len(processed_list)}张)", 
+                data=zip_buf.getvalue(), 
+                file_name=final_zip_name, 
+                type="primary", 
+                use_container_width=True
+            )
+    else:
+        st.info("请在左侧上传区域开始工作。")
