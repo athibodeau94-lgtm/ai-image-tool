@@ -1,2 +1,2 @@
-libgl1
-poppler-utils
+freeglut3-dev
+libgl1-mesa-glx
