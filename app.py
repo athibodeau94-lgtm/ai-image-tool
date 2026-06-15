@@ -4,18 +4,10 @@ import io
 import zipfile
 import os
 import numpy as np
+import cv2
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 import fitz
-
-# --- AI 抠图库云端平滑降级检测 ---
-try:
-    from rembg import remove, new_session
-    # 在云端使用最轻量的 u2netp 模型，防爆内存
-    bg_session = new_session("u2netp") 
-    HAS_REMBG = True
-except Exception as e:
-    HAS_REMBG = False
 
 # --- 1. 页面配置 ---
 st.set_page_config(page_title="餐影工坊", layout="wide")
@@ -47,28 +39,68 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- AI 智能精准抠图引擎 ---
-def ai_extract_foreground(img_obj):
-    if not HAS_REMBG:
-        return img_obj
+# --- 升级：自适应边缘感知菜品提取算法（纯算法，免依赖） ---
+def advanced_extract_foreground(img_obj):
     try:
-        w, h = img_obj.size
-        # 云端严格限宽 800，防止免费服务器算力不足卡死
-        max_ai_dim = 800
-        if max(w, h) > max_ai_dim:
-            scale = max_ai_dim / max(w, h)
-            img_for_ai = img_obj.resize((int(w * scale), int(h * scale)), Image.Resampling.BILINEAR)
-        else:
-            img_for_ai = img_obj
-
-        # 执行主体分离
-        output_rgba = remove(img_for_ai, session=bg_session)
-        
-        # 还原至原图分辨率
-        if max(w, h) > max_ai_dim:
-            output_rgba = output_rgba.resize((w, h), Image.Resampling.LANCZOS)
+        src = np.array(img_obj)
+        if src.shape[2] < 4:
+            src = cv2.cvtColor(src, cv2.COLOR_RGB2RGBA)
             
-        return output_rgba
+        h, w = src.shape[:2]
+        if min(h, w) < 50:
+            return img_obj
+            
+        # 1. 自适应调整处理尺寸，既保留大图细节又保证速度
+        max_dim = 700
+        scale = 1.0
+        if max(h, w) > max_dim:
+            scale = max_dim / max(h, w)
+            img_proc = cv2.resize(src, (int(w * scale), int(h * scale)))
+        else:
+            img_proc = src.copy()
+        
+        proc_h, proc_w = img_proc.shape[:2]
+        
+        # 2. 采用双边滤波（Bilateral Filter）在平滑背景的同时，死死锁住菜品的边缘特征
+        rgb_proc = img_proc[:, :, :3]
+        filtered = cv2.bilateralFilter(rgb_proc, 9, 75, 75)
+        
+        # 3. 智能菜品包围圈：不再死板划中央框，而是根据图像边缘自适应拓展边界
+        mask = np.zeros((proc_h, proc_w), np.uint8)
+        gray = cv2.cvtColor(filtered, cv2.COLOR_RGB2GRAY)
+        edges = cv2.Canny(gray, 30, 150)
+        pts = np.argwhere(edges > 0)
+        
+        if len(pts) > 0:
+            # 根据边缘分布动态决定前景框，防止贴边菜品被切碎
+            min_y, min_x = pts.min(axis=0)
+            max_y, max_x = pts.max(axis=0)
+            margin = 6
+            bx = max(0, min_x - margin)
+            by = max(0, min_y - margin)
+            bw = min(proc_w - bx, (max_x - min_x) + min(proc_w, margin * 2))
+            bh = min(proc_h - by, (max_y - min_y) + min(proc_h, margin * 2))
+            rect = (bx, by, bw, bh)
+        else:
+            rect = (4, 4, proc_w - 8, proc_h - 8)
+            
+        bgdModel = np.zeros((1, 65), np.float64)
+        fgdModel = np.zeros((1, 65), np.float64)
+        
+        # 4. 执行多通道迭代融合抠图
+        cv2.grabCut(filtered, mask, rect, bgdModel, fgdModel, 5, cv2.GC_INIT_WITH_RECT)
+        bin_mask = np.where((mask == cv2.GC_PR_BGD) | (mask == cv2.GC_BGD), 0, 1).astype('uint8')
+        
+        # 5. 尺寸复原与羽化边缘，保证融合极其自然
+        if scale != 1.0:
+            bin_mask = cv2.resize(bin_mask, (w, h), interpolation=cv2.INTER_LINEAR)
+            
+        bin_mask = cv2.GaussianBlur(bin_mask * 255, (7, 7), 0)
+        
+        out_rgba = src.copy()
+        out_rgba[:, :, 3] = np.minimum(out_rgba[:, :, 3], bin_mask)
+        
+        return Image.fromarray(out_rgba)
     except:
         return img_obj
 
@@ -97,7 +129,7 @@ def process_engine(img_input, config, is_preview=False):
         img = img.convert("RGBA")
         
         if config.get('auto_crop', False):
-            img = ai_extract_foreground(img)
+            img = advanced_extract_foreground(img)
             
         target_w, target_h = config['size']
         is_transparent_out = (config['bg_mode'] == "特定颜色" and config['pure_color'] == "透明")
@@ -236,9 +268,7 @@ with left_col:
             scale_mode = st.radio("画面填充模式", ["等比完整展示 (留背景)", "居中裁剪铺满 (大图感)"], index=0, key=f"sm_{st.session_state.settings_key}")
 
         with st.expander("视觉设置", expanded=False):
-            if not HAS_REMBG:
-                st.warning("提示：正在等待云端依赖库编译加载，稍后刷新即可解锁 AI 抠图。")
-            auto_crop_mode = st.checkbox("开启智能自动抠图 (智能提取菜品)", value=False, disabled=not HAS_REMBG, key=f"acrop_{st.session_state.settings_key}")
+            auto_crop_mode = st.checkbox("开启智能自动抠图 (智能提取菜品)", value=False, key=f"acrop_{st.session_state.settings_key}")
             
             bg_m = st.selectbox("背景模式", ["深度高斯模糊", "特定颜色", "提取原色"], key=f"bgm_{st.session_state.settings_key}")
             p_color = "白色"
