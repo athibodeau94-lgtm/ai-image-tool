@@ -1,3 +1,14 @@
+import sys
+# 将所有的导入放在 try 块中以捕获启动时的静默失败
+try:
+    import streamlit as st
+    import fitz
+    # ... 其他你的导入语句
+except Exception as e:
+    print(f"启动时发生异常: {e}")
+    import traceback
+    traceback.print_exc()
+    sys.exit(1)
 import streamlit as st
 from PIL import Image, ImageEnhance, ImageFilter, ImageOps, ImageDraw
 import io
