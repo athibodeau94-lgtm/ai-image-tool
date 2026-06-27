@@ -1,5 +1,4 @@
 build-essential
-libmupdf-dev
 libffi-dev
 libjpeg-dev
 zlib1g-dev
