@@ -2,4 +2,4 @@ streamlit
 pillow
 numpy
 opencv-python-headless
-pymupdf==1.27.2
+pymupdf>=1.27.0
