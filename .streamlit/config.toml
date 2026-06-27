@@ -2,4 +2,3 @@
 maxUploadSize = 1024
 maxMessageSize = 200
 enableCORS = false
-headless = true
