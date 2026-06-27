@@ -1,2 +1,5 @@
 [server]
-maxUploadSize = 1024 # 解除限制，允许上传最大 1GB 的文件
+maxUploadSize = 1024
+maxMessageSize = 200
+enableCORS = false
+headless = true
