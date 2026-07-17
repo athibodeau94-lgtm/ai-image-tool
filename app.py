@@ -95,7 +95,7 @@ def process_engine(img_input, config, is_preview=False):
                 bg = bg.filter(ImageFilter.GaussianBlur(config['blur_radius']))
                 bg = bg.resize((target_w, target_h), Image.Resampling.LANCZOS).convert("RGBA")
             elif config['bg_mode'] == "特定颜色":
-                color_map = {"白色": (255,255,255,255), "黑色": (0,0,0,255), "灰色": (200,200,200,255)}
+                color_map = {"白色": (255,255,255,255), "黑色": (0,0,255,255), "灰色": (200,200,200,255)}
                 c = color_map.get(config['pure_color'], (255,255,255,255))
                 bg = Image.new("RGBA", (target_w, target_h), c)
             else:
@@ -197,21 +197,29 @@ with left_col:
             
             vol_default_idx = 1 if res_label != "请选择..." else 0
             
+            # --- 核心改进：自定义尺寸输入框并排展示 ---
             if res_label == "自定义尺寸":
-                tw = st.number_input("宽", 100, 4000, 1920, key=f"tw_{st.session_state.settings_key}")
-                th = st.number_input("高", 100, 4000, 1080, key=f"th_{st.session_state.settings_key}")
+                col_w, col_h = st.columns(2)
+                with col_w:
+                    tw = st.number_input("宽 (px)", 100, 4000, 1920, key=f"tw_{st.session_state.settings_key}")
+                with col_h:
+                    th = st.number_input("高 (px)", 100, 4000, 1080, key=f"th_{st.session_state.settings_key}")
                 dim_name = f"{tw}-{th}"
             else:
                 raw_val = res_map[res_label]
                 tw, th = (1920, 1080) if raw_val == "none" else map(int, raw_val.split('*'))
                 dim_name = "5-3" if "5:3" in res_label else raw_val.replace("*", "-")
 
+            # --- 核心改进：自定义体积限制输入框 ---
             vol_opt = st.selectbox("体积控制", ["不限制", "500KB", "1MB", "自定义"], index=vol_default_idx, key=f"vol_{st.session_state.settings_key}")
-            kb = {"不限制": 0, "500KB": 500, "1MB": 1024}.get(vol_opt, 0)
+            if vol_opt == "自定义":
+                kb = st.number_input("最大体积限制 (KB)", 10, 10240, 800, key=f"custom_kb_{st.session_state.settings_key}")
+            else:
+                kb = {"不限制": 0, "500KB": 500, "1MB": 1024}.get(vol_opt, 0)
+                
             scale_mode = st.radio("画面填充模式", ["等比完整展示 (留背景)", "居中裁剪铺满 (大图感)"], index=0, key=f"sm_{st.session_state.settings_key}")
 
         with st.expander("🎨 视觉设置", expanded=False):
-            # 核心修改点：将默认背景模式改为 "深度高斯模糊"
             bg_m = st.selectbox("背景模式", ["深度高斯模糊", "特定颜色", "提取原色"], key=f"bgm_{st.session_state.settings_key}")
             p_color = "白色"
             if bg_m == "特定颜色":
