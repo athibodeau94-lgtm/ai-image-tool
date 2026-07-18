@@ -95,8 +95,9 @@ def process_engine(img_input, config, is_preview=False):
                 bg = bg.filter(ImageFilter.GaussianBlur(config['blur_radius']))
                 bg = bg.resize((target_w, target_h), Image.Resampling.LANCZOS).convert("RGBA")
             elif config['bg_mode'] == "特定颜色":
-               color_map = {"白色": (255,255,255,255), "黑色": (0,0,0,255), "灰色": (200,200,200,255)}
-                c = color_map.get(config['pure_color'], (255,255,255,255))
+                # 此处已修正：纯黑色的 RGB 通道现在全部为 0
+                color_map = {"白色": (255, 255, 255, 255), "黑色": (0, 0, 0, 255), "灰色": (200, 200, 200, 255)}
+                c = color_map.get(config['pure_color'], (255, 255, 255, 255))
                 bg = Image.new("RGBA", (target_w, target_h), c)
             else:
                 sample = img.convert("RGB").getpixel((img.size[0]//2, img.size[1]//2))
@@ -197,7 +198,7 @@ with left_col:
             
             vol_default_idx = 1 if res_label != "请选择..." else 0
             
-            # --- 核心改进：自定义尺寸输入框并排展示 ---
+            # 自定义尺寸输入框
             if res_label == "自定义尺寸":
                 col_w, col_h = st.columns(2)
                 with col_w:
@@ -210,7 +211,7 @@ with left_col:
                 tw, th = (1920, 1080) if raw_val == "none" else map(int, raw_val.split('*'))
                 dim_name = "5-3" if "5:3" in res_label else raw_val.replace("*", "-")
 
-            # --- 核心改进：自定义体积限制输入框 ---
+            # 自定义体积限制输入框
             vol_opt = st.selectbox("体积控制", ["不限制", "500KB", "1MB", "自定义"], index=vol_default_idx, key=f"vol_{st.session_state.settings_key}")
             if vol_opt == "自定义":
                 kb = st.number_input("最大体积限制 (KB)", 10, 10240, 800, key=f"custom_kb_{st.session_state.settings_key}")
