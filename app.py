@@ -95,7 +95,7 @@ def process_engine(img_input, config, is_preview=False):
                 bg = bg.filter(ImageFilter.GaussianBlur(config['blur_radius']))
                 bg = bg.resize((target_w, target_h), Image.Resampling.LANCZOS).convert("RGBA")
             elif config['bg_mode'] == "特定颜色":
-                color_map = {"白色": (255,255,255,255), "黑色": (0,0,255,255), "灰色": (200,200,200,255)}
+               color_map = {"白色": (255,255,255,255), "黑色": (0,0,0,255), "灰色": (200,200,200,255)}
                 c = color_map.get(config['pure_color'], (255,255,255,255))
                 bg = Image.new("RGBA", (target_w, target_h), c)
             else:
