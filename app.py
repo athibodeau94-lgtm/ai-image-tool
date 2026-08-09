@@ -5,7 +5,7 @@ import zipfile
 import os
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
-import fitz  # PyMuPDF 库，用于解析 PDF
+import fitz  # PyMuPDF 库，用于高效解析 PDF 内部的嵌入原生单图
 import gc    # 主动清理内存
 import cv2
 import numpy as np
@@ -20,13 +20,21 @@ def reset_all_settings():
     st.session_state.settings_key += 1
     st.rerun()
 
-# --- 辅助函数：智能主体视觉重心检测算法 ---
+# --- 辅助函数：智能主体视觉重心检测算法（防爆/极速版） ---
 def detect_subject_center(pil_img):
+    """
+    通过 OpenCV 计算主体视觉重心 (cx, cy)，控制在 0.0~1.0
+    先生成 400px 缩略图再识别，避免占用过多内存，彻底规避 OOM 崩溃
+    """
     try:
-        cv_img = cv2.cvtColor(np.array(pil_img.convert("RGB")), cv2.COLOR_RGB2BGR)
+        img_small = pil_img.copy()
+        img_small.thumbnail((400, 400), Image.Resampling.LANCZOS)
+        
+        cv_img = cv2.cvtColor(np.array(img_small.convert("RGB")), cv2.COLOR_RGB2BGR)
         h, w = cv_img.shape[:2]
         gray = cv2.cvtColor(cv_img, cv2.COLOR_BGR2GRAY)
         
+        # 抓取主体细节（边缘）
         edges = cv2.Canny(gray, 40, 120)
         kernel = np.ones((15, 15), np.uint8)
         dilated = cv2.dilate(edges, kernel, iterations=2)
@@ -35,6 +43,7 @@ def detect_subject_center(pil_img):
         if M["m00"] > 0:
             cx = (M["m10"] / M["m00"]) / w
             cy = (M["m01"] / M["m00"]) / h
+            # 限制重心在安全区域（15% ~ 85%），防止过于靠边
             return (max(0.15, min(0.85, cx)), max(0.15, min(0.85, cy)))
     except Exception:
         pass
@@ -99,6 +108,7 @@ def process_engine(img_input, config, is_preview=False):
         
         is_transparent_out = (config['bg_mode'] == "特定颜色" and config['pure_color'] == "透明")
         
+        # --- 铺满模式下智能重心裁切 ---
         if config.get('scale_mode') == "居中裁剪铺满 (大图感)":
             crop_focus = config.get('crop_focus', '智能识别主体')
             if crop_focus == "智能识别主体":
@@ -164,7 +174,7 @@ def process_engine(img_input, config, is_preview=False):
             else:
                 final_rgb.save(out_io, format="JPEG", quality=95, optimize=True)
             val = out_io.getvalue()
-            # 明确将输出后缀设为 jpg
+            # 统一输出后缀为 .jpg
             return val, "jpg"
     except Exception as e:
         return None, "Error"
@@ -274,7 +284,6 @@ with left_col:
                         crop_y = st.slider("纵向焦点 (上← →下)", 0.0, 1.0, 0.5, 0.05, key=f"cy_{st.session_state.settings_key}")
 
         with st.expander("视觉设置", expanded=False):
-            # 已移除“提取原色”
             bg_m = st.selectbox("背景模式", ["深度高斯模糊", "特定颜色"], key=f"bgm_{st.session_state.settings_key}")
             p_color = "白色"
             if bg_m == "特定颜色":
@@ -323,7 +332,6 @@ with right_col:
                     p_bytes, _ = final_outputs[idx]
                     if p_bytes: 
                         st.image(p_bytes, use_container_width=True)
-                        # 文件名主干提取，并在下方创建可编辑输入框
                         name_stem, _ = os.path.splitext(item["name"])
                         user_edited_stem = st.text_input(
                             label="图片名称", 
@@ -335,7 +343,7 @@ with right_col:
 
         st.write("---")
 
-        # 2. 导出下载逻辑（自动应用重命名及 .jpg 后缀）
+        # 2. 导出下载逻辑（应用自定义改名与 .jpg 后缀）
         if len(processed_list) == 1:
             data, ext = final_outputs[0]
             if data:
