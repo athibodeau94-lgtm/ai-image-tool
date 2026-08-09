@@ -18,7 +18,20 @@ def reset_all_settings():
     st.session_state.settings_key += 1
     st.rerun()
 
-# --- 2. 样式注入 (已剔除乱码字符，完美透出菜品内容) ---
+# --- 辅助函数：动态生成马赛克（棋盘格）背景 ---
+def create_checkerboard_bg(width, height, square_size=20):
+    """生成灰白交替的马赛克棋盘格背景"""
+    bg = Image.new("RGBA", (width, height), (255, 255, 255, 255))
+    draw = ImageDraw.Draw(bg)
+    color_gray = (220, 220, 220, 255)
+    
+    for y in range(0, height, square_size):
+        for x in range(0, width, square_size):
+            if ((x // square_size) + (y // square_size)) % 2 == 1:
+                draw.rectangle([x, y, x + square_size, y + square_size], fill=color_gray)
+    return bg
+
+# --- 2. 样式注入 ---
 st.markdown("""
     <style>
     header {visibility: hidden;}
@@ -53,7 +66,7 @@ def super_resolve_and_sharpen(img_obj):
     img_obj = ImageEnhance.Sharpness(img_obj).enhance(1.4)
     return img_obj
 
-# --- 3. 高性能核心引擎 (内存防御版) ---
+# --- 3. 高性能核心引擎 ---
 def process_engine(img_input, config, is_preview=False):
     img = None
     try:
@@ -84,6 +97,7 @@ def process_engine(img_input, config, is_preview=False):
                 mask = mask.filter(ImageFilter.GaussianBlur(radius=3)) 
                 img_resized.putalpha(mask)
 
+            # --- 背景构建逻辑更新 ---
             if is_transparent_out:
                 bg = Image.new("RGBA", (target_w, target_h), (0, 0, 0, 0))
             elif config['bg_mode'] == "深度高斯模糊":
@@ -91,16 +105,20 @@ def process_engine(img_input, config, is_preview=False):
                 bg = bg.filter(ImageFilter.GaussianBlur(config['blur_radius']))
                 bg = bg.resize((target_w, target_h), Image.Resampling.LANCZOS).convert("RGBA")
             elif config['bg_mode'] == "特定颜色":
-                color_map = {"白色": (255, 255, 255, 255), "黑色": (0, 0, 0, 255), "灰色": (200, 200, 200, 255)}
-                c = color_map.get(config['pure_color'], (255, 255, 255, 255))
-                bg = Image.new("RGBA", (target_w, target_h), c)
+                if config['pure_color'] == "马赛克":
+                    # 动态创建马赛克棋盘格底图
+                    bg = create_checkerboard_bg(target_w, target_h, square_size=24)
+                else:
+                    color_map = {"白色": (255, 255, 255, 255), "黑色": (0, 0, 0, 255), "灰色": (200, 200, 200, 255)}
+                    c = color_map.get(config['pure_color'], (255, 255, 255, 255))
+                    bg = Image.new("RGBA", (target_w, target_h), c)
             else:
                 sample = img.convert("RGB").getpixel((img.size[0]//2, img.size[1]//2))
                 bg = Image.new("RGBA", (target_w, target_h), sample + (255,))
             
             bg.alpha_composite(img_resized, ((target_w - img_resized.size[0]) // 2, (target_h - img_resized.size[1]) // 2))
             res_img = bg
-            del img_resized  # 及时释放中间对象
+            del img_resized
 
         res_img = ImageEnhance.Brightness(res_img).enhance(config['bright'])
         res_img = ImageEnhance.Sharpness(res_img).enhance(config['sharp'])
@@ -127,7 +145,6 @@ def process_engine(img_input, config, is_preview=False):
     except Exception as e:
         return None, "Error"
     finally:
-        # 强制清理本轮生成的图像对象，防止 RAM 驻留
         if 'img' in locals(): del img
         if 'res_img' in locals(): del res_img
         if 'final_rgb' in locals(): del final_rgb
@@ -180,7 +197,7 @@ with left_col:
                     processed_list.append({"name": fake_name, "content": hd_io.getvalue()})
                     img_idx += 1
                     
-                    del raw_pil, hd_pil  # 清理 pdf 解析中间件
+                    del raw_pil, hd_pil
             doc.close()
         else:
             zip_prefix = datetime.now().strftime("%m%d")
@@ -225,7 +242,8 @@ with left_col:
             bg_m = st.selectbox("背景模式", ["深度高斯模糊", "特定颜色", "提取原色"], key=f"bgm_{st.session_state.settings_key}")
             p_color = "白色"
             if bg_m == "特定颜色":
-                p_color = st.selectbox("底色选择", ["白色", "黑色", "灰色", "透明"], key=f"pcol_{st.session_state.settings_key}")
+                # 此处已更新排序：白色、透明、黑色、马赛克、灰色
+                p_color = st.selectbox("底色选择", ["白色", "透明", "黑色", "马赛克", "灰色"], key=f"pcol_{st.session_state.settings_key}")
             b_radius = st.slider("模糊强度", 0, 200, 70, key=f"brad_{st.session_state.settings_key}")
             flt = st.selectbox("滤镜效果", ["原色", "暖色调", "清爽调"], key=f"flt_{st.session_state.settings_key}")
             br = st.slider("亮度", 0.5, 1.5, 1.0, key=f"br_{st.session_state.settings_key}")
@@ -242,12 +260,10 @@ with right_col:
         
         final_outputs = []
         with st.spinner("🚀 图像处理中..."):
-            # 关键优化点 1：将 max_workers 限制为 2~3，防止并发过多造成 RAM 暴顶引发崩溃
             with ThreadPoolExecutor(max_workers=2) as executor:
                 futures = [executor.submit(process_engine, item["content"], conf, is_preview=False) for item in processed_list]
                 final_outputs = [f.result() for f in futures]
         
-        # 强制垃圾回收一次
         gc.collect()
 
         # 1. 实时预览展现
@@ -270,7 +286,6 @@ with right_col:
         else:
             final_zip_name = f"{zip_prefix}-{dim_name}.zip"
             zip_buf = io.BytesIO()
-            # 关键优化点 2：打包 ZIP 时及时清理字节流，减小常驻内存
             with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
                 for idx, item in enumerate(processed_list):
                     data, ext = final_outputs[idx]
@@ -286,7 +301,6 @@ with right_col:
                 use_container_width=True
             )
             
-            # 打包完成后主动清空临时内存资源
             del final_outputs
             gc.collect()
     else:
