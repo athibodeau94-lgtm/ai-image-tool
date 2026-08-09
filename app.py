@@ -5,11 +5,13 @@ import zipfile
 import os
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
-import fitz  # PyMuPDF 库，用于高效解析 PDF 内部的嵌入原生单图
-import gc    # 引入垃圾回收模块，用于主动清理内存
+import fitz  # PyMuPDF 库，用于解析 PDF
+import gc    # 主动清理内存
+import cv2
+import numpy as np
 
 # --- 1. 页面配置 ---
-st.set_page_config(page_title="餐影工坊 2.0 Pro", layout="wide", page_icon="🍽️")
+st.set_page_config(page_title="餐影工坊 2.0 Pro", layout="wide")
 
 if 'settings_key' not in st.session_state:
     st.session_state.settings_key = 0
@@ -18,9 +20,28 @@ def reset_all_settings():
     st.session_state.settings_key += 1
     st.rerun()
 
-# --- 辅助函数：动态生成马赛克（棋盘格）背景 ---
+# --- 辅助函数：智能主体视觉重心检测算法 ---
+def detect_subject_center(pil_img):
+    try:
+        cv_img = cv2.cvtColor(np.array(pil_img.convert("RGB")), cv2.COLOR_RGB2BGR)
+        h, w = cv_img.shape[:2]
+        gray = cv2.cvtColor(cv_img, cv2.COLOR_BGR2GRAY)
+        
+        edges = cv2.Canny(gray, 40, 120)
+        kernel = np.ones((15, 15), np.uint8)
+        dilated = cv2.dilate(edges, kernel, iterations=2)
+        
+        M = cv2.moments(dilated)
+        if M["m00"] > 0:
+            cx = (M["m10"] / M["m00"]) / w
+            cy = (M["m01"] / M["m00"]) / h
+            return (max(0.15, min(0.85, cx)), max(0.15, min(0.85, cy)))
+    except Exception:
+        pass
+    return (0.5, 0.5)
+
+# --- 辅助函数：生成马赛克（棋盘格）背景 ---
 def create_checkerboard_bg(width, height, square_size=20):
-    """生成灰白交替的马赛克棋盘格背景"""
     bg = Image.new("RGBA", (width, height), (255, 255, 255, 255))
     draw = ImageDraw.Draw(bg)
     color_gray = (220, 220, 220, 255)
@@ -37,7 +58,6 @@ st.markdown("""
     header {visibility: hidden;}
     .block-container {padding-top: 2rem !important;}
     
-    /* 为预览图区域注入标准的电商透明棋盘格，不遮挡任何图像元素 */
     .stImage > img { 
         border-radius: 4px; 
         object-fit: contain; 
@@ -53,9 +73,6 @@ st.markdown("""
 
 # --- PDF 低清小图智能高清重构算法 ---
 def super_resolve_and_sharpen(img_obj):
-    """
-    通过双阶超分重采样与边缘增强，彻底清除 PDF 栅格化带来的低分辨率马赛克与锯齿
-    """
     w, h = img_obj.size
     if w < 1000 or h < 1000:
         scale_factor = 2 if max(w, h) > 500 else 3
@@ -83,21 +100,29 @@ def process_engine(img_input, config, is_preview=False):
         is_transparent_out = (config['bg_mode'] == "特定颜色" and config['pure_color'] == "透明")
         
         if config.get('scale_mode') == "居中裁剪铺满 (大图感)":
-            res_img = ImageOps.fit(img, (target_w, target_h), Image.Resampling.LANCZOS)
+            crop_focus = config.get('crop_focus', '智能识别主体')
+            if crop_focus == "智能识别主体":
+                cx, cy = detect_subject_center(img)
+            elif crop_focus == "自定义偏移":
+                cx = config.get('crop_x', 0.5)
+                cy = config.get('crop_y', 0.5)
+            else:
+                cx, cy = 0.5, 0.5
+            
+            res_img = ImageOps.fit(img, (target_w, target_h), Image.Resampling.LANCZOS, centering=(cx, cy))
         else:
             original_w, original_h = img.size
             ratio = min(target_w / original_w, target_h / original_h)
             new_size = (int(original_w * ratio), int(original_h * ratio))
             img_resized = img.resize(new_size, Image.Resampling.LANCZOS)
             
-            if config['bg_mode'] in ["深度高斯模糊", "提取原色"] and not is_transparent_out:
+            if config['bg_mode'] == "深度高斯模糊" and not is_transparent_out:
                 mask = Image.new("L", new_size, 255)
                 draw = ImageDraw.Draw(mask)
                 draw.rectangle([0, 0, new_size[0], new_size[1]], outline=0, width=2)
                 mask = mask.filter(ImageFilter.GaussianBlur(radius=3)) 
                 img_resized.putalpha(mask)
 
-            # --- 背景构建逻辑更新 ---
             if is_transparent_out:
                 bg = Image.new("RGBA", (target_w, target_h), (0, 0, 0, 0))
             elif config['bg_mode'] == "深度高斯模糊":
@@ -106,15 +131,13 @@ def process_engine(img_input, config, is_preview=False):
                 bg = bg.resize((target_w, target_h), Image.Resampling.LANCZOS).convert("RGBA")
             elif config['bg_mode'] == "特定颜色":
                 if config['pure_color'] == "马赛克":
-                    # 动态创建马赛克棋盘格底图
                     bg = create_checkerboard_bg(target_w, target_h, square_size=24)
                 else:
                     color_map = {"白色": (255, 255, 255, 255), "黑色": (0, 0, 0, 255), "灰色": (200, 200, 200, 255)}
                     c = color_map.get(config['pure_color'], (255, 255, 255, 255))
                     bg = Image.new("RGBA", (target_w, target_h), c)
             else:
-                sample = img.convert("RGB").getpixel((img.size[0]//2, img.size[1]//2))
-                bg = Image.new("RGBA", (target_w, target_h), sample + (255,))
+                bg = Image.new("RGBA", (target_w, target_h), (255, 255, 255, 255))
             
             bg.alpha_composite(img_resized, ((target_w - img_resized.size[0]) // 2, (target_h - img_resized.size[1]) // 2))
             res_img = bg
@@ -128,7 +151,7 @@ def process_engine(img_input, config, is_preview=False):
         if is_transparent_out:
             res_img.save(out_io, format="PNG")
             val = out_io.getvalue()
-            return val, "PNG"
+            return val, "png"
         else:
             final_rgb = res_img.convert("RGB")
             del res_img
@@ -141,7 +164,8 @@ def process_engine(img_input, config, is_preview=False):
             else:
                 final_rgb.save(out_io, format="JPEG", quality=95, optimize=True)
             val = out_io.getvalue()
-            return val, "JPEG"
+            # 明确将输出后缀设为 jpg
+            return val, "jpg"
     except Exception as e:
         return None, "Error"
     finally:
@@ -153,7 +177,7 @@ def process_engine(img_input, config, is_preview=False):
 left_col, right_col = st.columns([1.1, 2.5], gap="large")
 
 with left_col:
-    st.subheader("📁 导入中心")
+    st.subheader("导入中心")
     raw_uploads = st.file_uploader("支持拖入文件夹、ZIP包、PDF文档或多选图片", type=['jpg','jpeg','png','pdf','zip'], accept_multiple_files=True)
     
     processed_list = []
@@ -205,7 +229,7 @@ with left_col:
                 processed_list.append({"name": f.name, "content": f.getvalue()})
 
     with st.container():
-        with st.expander("🛠️ 规格设置", expanded=True):
+        with st.expander("规格设置", expanded=True):
             res_map = {
                 "请选择...": "none", 
                 "聚合标准 (1920*1080)": "1920*1080", 
@@ -238,11 +262,22 @@ with left_col:
                 
             scale_mode = st.radio("画面填充模式", ["等比完整展示 (留背景)", "居中裁剪铺满 (大图感)"], index=0, key=f"sm_{st.session_state.settings_key}")
 
-        with st.expander("🎨 视觉设置", expanded=False):
-            bg_m = st.selectbox("背景模式", ["深度高斯模糊", "特定颜色", "提取原色"], key=f"bgm_{st.session_state.settings_key}")
+            crop_focus = "智能识别主体"
+            crop_x, crop_y = 0.5, 0.5
+            if scale_mode == "居中裁剪铺满 (大图感)":
+                crop_focus = st.selectbox("裁剪重心焦点", ["智能识别主体", "绝对几何居中", "自定义偏移"], key=f"cf_{st.session_state.settings_key}")
+                if crop_focus == "自定义偏移":
+                    col_cx, col_cy = st.columns(2)
+                    with col_cx:
+                        crop_x = st.slider("横向焦点 (左← →右)", 0.0, 1.0, 0.4, 0.05, key=f"cx_{st.session_state.settings_key}")
+                    with col_cy:
+                        crop_y = st.slider("纵向焦点 (上← →下)", 0.0, 1.0, 0.5, 0.05, key=f"cy_{st.session_state.settings_key}")
+
+        with st.expander("视觉设置", expanded=False):
+            # 已移除“提取原色”
+            bg_m = st.selectbox("背景模式", ["深度高斯模糊", "特定颜色"], key=f"bgm_{st.session_state.settings_key}")
             p_color = "白色"
             if bg_m == "特定颜色":
-                # 此处已更新排序：白色、透明、黑色、马赛克、灰色
                 p_color = st.selectbox("底色选择", ["白色", "透明", "黑色", "马赛克", "灰色"], key=f"pcol_{st.session_state.settings_key}")
             b_radius = st.slider("模糊强度", 0, 200, 70, key=f"brad_{st.session_state.settings_key}")
             flt = st.selectbox("滤镜效果", ["原色", "暖色调", "清爽调"], key=f"flt_{st.session_state.settings_key}")
@@ -250,39 +285,62 @@ with left_col:
             sh = st.slider("锐化", 1.0, 4.0, 1.5, key=f"sh_{st.session_state.settings_key}")
 
     st.write("---")
-    if st.button("🔄 重置所有设置", use_container_width=True):
+    if st.button("重置所有设置", use_container_width=True):
         reset_all_settings()
 
 with right_col:
-    st.subheader("🔍 实时预览与导出")
+    st.subheader("实时预览与导出")
     if processed_list:
-        conf = {'size': (tw, th), 'limit_kb': kb, 'bg_mode': bg_m, 'pure_color': p_color, 'blur_radius': b_radius, 'filter': flt, 'bright': br, 'sharp': sh, 'scale_mode': scale_mode}
+        conf = {
+            'size': (tw, th), 
+            'limit_kb': kb, 
+            'bg_mode': bg_m, 
+            'pure_color': p_color, 
+            'blur_radius': b_radius, 
+            'filter': flt, 
+            'bright': br, 
+            'sharp': sh, 
+            'scale_mode': scale_mode,
+            'crop_focus': crop_focus,
+            'crop_x': crop_x,
+            'crop_y': crop_y
+        }
         
         final_outputs = []
-        with st.spinner("🚀 图像处理中..."):
+        with st.spinner("图像处理中..."):
             with ThreadPoolExecutor(max_workers=2) as executor:
                 futures = [executor.submit(process_engine, item["content"], conf, is_preview=False) for item in processed_list]
                 final_outputs = [f.result() for f in futures]
         
         gc.collect()
 
-        # 1. 实时预览展现
-        with st.container(height=450):
+        # 1. 实时预览展示与文件名重命名框
+        edited_names = []
+        with st.container(height=480):
             cols = st.columns(3)
             for idx, item in enumerate(processed_list):
                 with cols[idx % 3]:
                     p_bytes, _ = final_outputs[idx]
                     if p_bytes: 
-                        st.image(p_bytes, use_container_width=True, caption=item["name"])
+                        st.image(p_bytes, use_container_width=True)
+                        # 文件名主干提取，并在下方创建可编辑输入框
+                        name_stem, _ = os.path.splitext(item["name"])
+                        user_edited_stem = st.text_input(
+                            label="图片名称", 
+                            value=name_stem, 
+                            key=f"rename_{idx}_{st.session_state.settings_key}", 
+                            label_visibility="collapsed"
+                        )
+                        edited_names.append(user_edited_stem)
 
         st.write("---")
 
-        # 2. 原生一键秒速下载
+        # 2. 导出下载逻辑（自动应用重命名及 .jpg 后缀）
         if len(processed_list) == 1:
             data, ext = final_outputs[0]
             if data:
-                orig_name = os.path.splitext(processed_list[0]["name"])[0]
-                st.download_button(f"🚀 下载处理后的图片: {processed_list[0]['name']}", data=data, file_name=f"{orig_name}.{ext.lower()}", type="primary", use_container_width=True)
+                final_filename = f"{edited_names[0]}.{ext.lower()}"
+                st.download_button(f"下载处理后的图片: {final_filename}", data=data, file_name=final_filename, type="primary", use_container_width=True)
         else:
             final_zip_name = f"{zip_prefix}-{dim_name}.zip"
             zip_buf = io.BytesIO()
@@ -290,11 +348,11 @@ with right_col:
                 for idx, item in enumerate(processed_list):
                     data, ext = final_outputs[idx]
                     if data:
-                        name_only = os.path.splitext(item["name"])[0]
-                        zf.writestr(f"{name_only}.{ext.lower()}", data)
+                        final_filename = f"{edited_names[idx]}.{ext.lower()}"
+                        zf.writestr(final_filename, data)
             
             st.download_button(
-                label=f"🚀 立即打包下载 ({len(processed_list)}张)", 
+                label=f"立即打包下载 ({len(processed_list)}张)", 
                 data=zip_buf.getvalue(), 
                 file_name=final_zip_name, 
                 type="primary", 
@@ -304,4 +362,4 @@ with right_col:
             del final_outputs
             gc.collect()
     else:
-        st.info("💡 请在左侧上传区域开始工作。")
+        st.info("请在左侧上传区域开始工作。")
