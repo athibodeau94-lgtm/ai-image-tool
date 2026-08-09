@@ -6,6 +6,7 @@ import os
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 import fitz  # PyMuPDF 库，用于高效解析 PDF 内部的嵌入原生单图
+import gc    # 引入垃圾回收模块，用于主动清理内存
 
 # --- 1. 页面配置 ---
 st.set_page_config(page_title="餐影工坊 2.0 Pro", layout="wide", page_icon="🍽️")
@@ -37,26 +38,24 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- 新增：PDF 低清小图智能高清重构算法 ---
+# --- PDF 低清小图智能高清重构算法 ---
 def super_resolve_and_sharpen(img_obj):
     """
     通过双阶超分重采样与边缘增强，彻底清除 PDF 栅格化带来的低分辨率马赛克与锯齿
     """
     w, h = img_obj.size
-    # 如果提取出的单图过小（比如任意一边低于 1000 像素），则执行强力超分重建
     if w < 1000 or h < 1000:
         scale_factor = 2 if max(w, h) > 500 else 3
         new_w, new_h = int(w * scale_factor), int(h * scale_factor)
-        # 第一步：高保真级重采样拉伸，平滑马赛克色块
         img_obj = img_obj.resize((new_w, new_h), Image.Resampling.LANCZOS)
         
-    # 第二步：高能边缘锐化修复（连续叠加轻量边缘增强，收窄虚焦的毛边）
     img_obj = img_obj.filter(ImageFilter.EDGE_ENHANCE)
     img_obj = ImageEnhance.Sharpness(img_obj).enhance(1.4)
     return img_obj
 
-# --- 3. 高性能核心引擎 (完美维持 Alpha 透明通道) ---
+# --- 3. 高性能核心引擎 (内存防御版) ---
 def process_engine(img_input, config, is_preview=False):
+    img = None
     try:
         if isinstance(img_input, (bytes, io.BytesIO)):
             img = Image.open(io.BytesIO(img_input if isinstance(img_input, bytes) else img_input.getvalue()))
@@ -68,7 +67,6 @@ def process_engine(img_input, config, is_preview=False):
         img = img.convert("RGBA")
         target_w, target_h = config['size']
         
-        # 判定最终是否需要保留并导出透明底
         is_transparent_out = (config['bg_mode'] == "特定颜色" and config['pure_color'] == "透明")
         
         if config.get('scale_mode') == "居中裁剪铺满 (大图感)":
@@ -79,7 +77,6 @@ def process_engine(img_input, config, is_preview=False):
             new_size = (int(original_w * ratio), int(original_h * ratio))
             img_resized = img.resize(new_size, Image.Resampling.LANCZOS)
             
-            # 边界羽化融合 (只有不导出透明底时才执行，防止破坏原图的透明边缘)
             if config['bg_mode'] in ["深度高斯模糊", "提取原色"] and not is_transparent_out:
                 mask = Image.new("L", new_size, 255)
                 draw = ImageDraw.Draw(mask)
@@ -87,7 +84,6 @@ def process_engine(img_input, config, is_preview=False):
                 mask = mask.filter(ImageFilter.GaussianBlur(radius=3)) 
                 img_resized.putalpha(mask)
 
-            # 根据配置动态生成画布
             if is_transparent_out:
                 bg = Image.new("RGBA", (target_w, target_h), (0, 0, 0, 0))
             elif config['bg_mode'] == "深度高斯模糊":
@@ -95,7 +91,6 @@ def process_engine(img_input, config, is_preview=False):
                 bg = bg.filter(ImageFilter.GaussianBlur(config['blur_radius']))
                 bg = bg.resize((target_w, target_h), Image.Resampling.LANCZOS).convert("RGBA")
             elif config['bg_mode'] == "特定颜色":
-                # 此处已修正：纯黑色的 RGB 通道现在全部为 0
                 color_map = {"白色": (255, 255, 255, 255), "黑色": (0, 0, 0, 255), "灰色": (200, 200, 200, 255)}
                 c = color_map.get(config['pure_color'], (255, 255, 255, 255))
                 bg = Image.new("RGBA", (target_w, target_h), c)
@@ -105,19 +100,20 @@ def process_engine(img_input, config, is_preview=False):
             
             bg.alpha_composite(img_resized, ((target_w - img_resized.size[0]) // 2, (target_h - img_resized.size[1]) // 2))
             res_img = bg
+            del img_resized  # 及时释放中间对象
 
-        # 调节亮度与锐度
         res_img = ImageEnhance.Brightness(res_img).enhance(config['bright'])
         res_img = ImageEnhance.Sharpness(res_img).enhance(config['sharp'])
 
         out_io = io.BytesIO()
         
-        # 全流程透明底保护
         if is_transparent_out:
             res_img.save(out_io, format="PNG")
-            return out_io.getvalue(), "PNG"
+            val = out_io.getvalue()
+            return val, "PNG"
         else:
             final_rgb = res_img.convert("RGB")
+            del res_img
             if not is_preview and config['limit_kb'] > 0:
                 for q in [95, 85, 70, 50, 30]:
                     out_io = io.BytesIO()
@@ -126,9 +122,15 @@ def process_engine(img_input, config, is_preview=False):
                         break
             else:
                 final_rgb.save(out_io, format="JPEG", quality=95, optimize=True)
-            return out_io.getvalue(), "JPEG"
-    except:
+            val = out_io.getvalue()
+            return val, "JPEG"
+    except Exception as e:
         return None, "Error"
+    finally:
+        # 强制清理本轮生成的图像对象，防止 RAM 驻留
+        if 'img' in locals(): del img
+        if 'res_img' in locals(): del res_img
+        if 'final_rgb' in locals(): del final_rgb
 
 # --- 4. 界面布局 ---
 left_col, right_col = st.columns([1.1, 2.5], gap="large")
@@ -168,17 +170,18 @@ with left_col:
                     img_bytes = base_image["image"]
                     img_ext = base_image["ext"]
                     
-                    # 读入 PIL 对象，自动洗掉并重构可能存在的低清马赛克
                     raw_pil = Image.open(io.BytesIO(img_bytes))
                     hd_pil = super_resolve_and_sharpen(raw_pil)
                     
-                    # 将高清重建后的图片无缝转回字节流送入核心引擎
                     hd_io = io.BytesIO()
                     hd_pil.save(hd_io, format="PNG" if img_ext.lower() == "png" else "JPEG")
                     
                     fake_name = f"pdf_img_{img_idx}.{img_ext}"
                     processed_list.append({"name": fake_name, "content": hd_io.getvalue()})
                     img_idx += 1
+                    
+                    del raw_pil, hd_pil  # 清理 pdf 解析中间件
+            doc.close()
         else:
             zip_prefix = datetime.now().strftime("%m%d")
             for f in raw_uploads:
@@ -198,7 +201,6 @@ with left_col:
             
             vol_default_idx = 1 if res_label != "请选择..." else 0
             
-            # 自定义尺寸输入框
             if res_label == "自定义尺寸":
                 col_w, col_h = st.columns(2)
                 with col_w:
@@ -211,7 +213,6 @@ with left_col:
                 tw, th = (1920, 1080) if raw_val == "none" else map(int, raw_val.split('*'))
                 dim_name = "5-3" if "5:3" in res_label else raw_val.replace("*", "-")
 
-            # 自定义体积限制输入框
             vol_opt = st.selectbox("体积控制", ["不限制", "500KB", "1MB", "自定义"], index=vol_default_idx, key=f"vol_{st.session_state.settings_key}")
             if vol_opt == "自定义":
                 kb = st.number_input("最大体积限制 (KB)", 10, 10240, 800, key=f"custom_kb_{st.session_state.settings_key}")
@@ -240,11 +241,15 @@ with right_col:
         conf = {'size': (tw, th), 'limit_kb': kb, 'bg_mode': bg_m, 'pure_color': p_color, 'blur_radius': b_radius, 'filter': flt, 'bright': br, 'sharp': sh, 'scale_mode': scale_mode}
         
         final_outputs = []
-        with st.spinner("🚀 多线程图像并行洗图转码中..."):
-            with ThreadPoolExecutor() as executor:
+        with st.spinner("🚀 图像处理中..."):
+            # 关键优化点 1：将 max_workers 限制为 2~3，防止并发过多造成 RAM 暴顶引发崩溃
+            with ThreadPoolExecutor(max_workers=2) as executor:
                 futures = [executor.submit(process_engine, item["content"], conf, is_preview=False) for item in processed_list]
                 final_outputs = [f.result() for f in futures]
         
+        # 强制垃圾回收一次
+        gc.collect()
+
         # 1. 实时预览展现
         with st.container(height=450):
             cols = st.columns(3)
@@ -265,6 +270,7 @@ with right_col:
         else:
             final_zip_name = f"{zip_prefix}-{dim_name}.zip"
             zip_buf = io.BytesIO()
+            # 关键优化点 2：打包 ZIP 时及时清理字节流，减小常驻内存
             with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
                 for idx, item in enumerate(processed_list):
                     data, ext = final_outputs[idx]
@@ -279,5 +285,9 @@ with right_col:
                 type="primary", 
                 use_container_width=True
             )
+            
+            # 打包完成后主动清空临时内存资源
+            del final_outputs
+            gc.collect()
     else:
         st.info("💡 请在左侧上传区域开始工作。")
