@@ -232,6 +232,7 @@ with left_col:
                 processed_list.append({"name": f.name, "content": f.getvalue()})
 
     with st.container():
+        # 1. 规格设置 (默认展开)
         with st.expander("规格设置", expanded=True):
             res_map = {
                 "请选择...": "none", 
@@ -276,7 +277,8 @@ with left_col:
                     with col_cy:
                         crop_y = st.slider("纵向焦点 (上← →下)", 0.0, 1.0, 0.5, 0.05, key=f"cy_{st.session_state.settings_key}")
 
-        with st.expander("视觉设置", expanded=False):
+        # 2. 视觉设置 (设置 expanded=True，默认展开)
+        with st.expander("视觉设置", expanded=True):
             bg_m = st.selectbox("背景模式", ["深度高斯模糊", "特定颜色"], key=f"bgm_{st.session_state.settings_key}")
             p_color = "白色"
             if bg_m == "特定颜色":
