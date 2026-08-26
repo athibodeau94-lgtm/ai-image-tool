@@ -100,7 +100,12 @@ def process_engine(img_input, config, is_preview=False):
 
         img = img.convert("RGBA")
         
-        # 新增：判断是否禁用了比例预设，如果尺寸为 None，则直接保持原图宽高
+        # 【性能优化加速】如果原图超大（单边大于2500px），先按比例快速预缩放，避免做高斯模糊和压缩时卡死
+        max_limit = 2500
+        if max(img.size) > max_limit:
+            img.thumbnail((max_limit, max_limit), Image.Resampling.LANCZOS)
+        
+        # 判断是否禁用了比例预设，如果尺寸为 None，则直接保持原图宽高
         if config['size'] is None:
             target_w, target_h = img.size
             res_img = img.copy()
@@ -240,7 +245,6 @@ with left_col:
     with st.container():
         # 1. 规格设置 (默认展开)
         with st.expander("规格设置", expanded=True):
-            # 新增：“不调整尺寸(保持原图)” 选项放在第一项作为默认选中值
             res_map = {
                 "不调整尺寸(保持原图)": "none", 
                 "聚合标准 (1920*1080)": "1920*1080", 
@@ -260,7 +264,6 @@ with left_col:
                 dim_name = f"{tw}-{th}"
                 target_dim = (tw, th)
             elif res_map[res_label] == "none":
-                # 选择不调整尺寸时，目标尺寸设为 None，保持原图导出
                 dim_name = "original"
                 target_dim = None
             else:
