@@ -99,59 +99,65 @@ def process_engine(img_input, config, is_preview=False):
             img = img_input
 
         img = img.convert("RGBA")
-        target_w, target_h = config['size']
         
-        is_transparent_out = (config['bg_mode'] == "特定颜色" and config['pure_color'] == "透明")
-        
-        if config.get('scale_mode') == "居中裁剪铺满 (大图感)":
-            crop_focus = config.get('crop_focus', '智能识别主体')
-            if crop_focus == "智能识别主体":
-                cx, cy = detect_subject_center(img)
-            elif crop_focus == "自定义偏移":
-                cx = config.get('crop_x', 0.5)
-                cy = config.get('crop_y', 0.5)
-            else:
-                cx, cy = 0.5, 0.5
-            
-            res_img = ImageOps.fit(img, (target_w, target_h), Image.Resampling.LANCZOS, centering=(cx, cy))
+        # 新增：判断是否禁用了比例预设，如果尺寸为 None，则直接保持原图宽高
+        if config['size'] is None:
+            target_w, target_h = img.size
+            res_img = img.copy()
         else:
-            original_w, original_h = img.size
-            ratio = min(target_w / original_w, target_h / original_h)
-            new_size = (int(original_w * ratio), int(original_h * ratio))
-            img_resized = img.resize(new_size, Image.Resampling.LANCZOS)
+            target_w, target_h = config['size']
+            is_transparent_out = (config['bg_mode'] == "特定颜色" and config['pure_color'] == "透明")
             
-            if config['bg_mode'] == "深度高斯模糊" and not is_transparent_out:
-                mask = Image.new("L", new_size, 255)
-                draw = ImageDraw.Draw(mask)
-                draw.rectangle([0, 0, new_size[0], new_size[1]], outline=0, width=2)
-                mask = mask.filter(ImageFilter.GaussianBlur(radius=3)) 
-                img_resized.putalpha(mask)
-
-            if is_transparent_out:
-                bg = Image.new("RGBA", (target_w, target_h), (0, 0, 0, 0))
-            elif config['bg_mode'] == "深度高斯模糊":
-                bg = img.convert("RGB").resize((target_w//4, target_h//4))
-                bg = bg.filter(ImageFilter.GaussianBlur(config['blur_radius']))
-                bg = bg.resize((target_w, target_h), Image.Resampling.LANCZOS).convert("RGBA")
-            elif config['bg_mode'] == "特定颜色":
-                if config['pure_color'] == "马赛克":
-                    bg = create_checkerboard_bg(target_w, target_h, square_size=24)
+            if config.get('scale_mode') == "居中裁剪铺满 (大图感)":
+                crop_focus = config.get('crop_focus', '智能识别主体')
+                if crop_focus == "智能识别主体":
+                    cx, cy = detect_subject_center(img)
+                elif crop_focus == "自定义偏移":
+                    cx = config.get('crop_x', 0.5)
+                    cy = config.get('crop_y', 0.5)
                 else:
-                    color_map = {"白色": (255, 255, 255, 255), "黑色": (0, 0, 0, 255), "灰色": (200, 200, 200, 255)}
-                    c = color_map.get(config['pure_color'], (255, 255, 255, 255))
-                    bg = Image.new("RGBA", (target_w, target_h), c)
+                    cx, cy = 0.5, 0.5
+                
+                res_img = ImageOps.fit(img, (target_w, target_h), Image.Resampling.LANCZOS, centering=(cx, cy))
             else:
-                bg = Image.new("RGBA", (target_w, target_h), (255, 255, 255, 255))
-            
-            bg.alpha_composite(img_resized, ((target_w - img_resized.size[0]) // 2, (target_h - img_resized.size[1]) // 2))
-            res_img = bg
-            del img_resized
+                original_w, original_h = img.size
+                ratio = min(target_w / original_w, target_h / original_h)
+                new_size = (int(original_w * ratio), int(original_h * ratio))
+                img_resized = img.resize(new_size, Image.Resampling.LANCZOS)
+                
+                if config['bg_mode'] == "深度高斯模糊" and not is_transparent_out:
+                    mask = Image.new("L", new_size, 255)
+                    draw = ImageDraw.Draw(mask)
+                    draw.rectangle([0, 0, new_size[0], new_size[1]], outline=0, width=2)
+                    mask = mask.filter(ImageFilter.GaussianBlur(radius=3)) 
+                    img_resized.putalpha(mask)
+
+                if is_transparent_out:
+                    bg = Image.new("RGBA", (target_w, target_h), (0, 0, 0, 0))
+                elif config['bg_mode'] == "深度高斯模糊":
+                    bg = img.convert("RGB").resize((target_w//4, target_h//4))
+                    bg = bg.filter(ImageFilter.GaussianBlur(config['blur_radius']))
+                    bg = bg.resize((target_w, target_h), Image.Resampling.LANCZOS).convert("RGBA")
+                elif config['bg_mode'] == "特定颜色":
+                    if config['pure_color'] == "马赛克":
+                        bg = create_checkerboard_bg(target_w, target_h, square_size=24)
+                    else:
+                        color_map = {"白色": (255, 255, 255, 255), "黑色": (0, 0, 0, 255), "灰色": (200, 200, 200, 255)}
+                        c = color_map.get(config['pure_color'], (255, 255, 255, 255))
+                        bg = Image.new("RGBA", (target_w, target_h), c)
+                else:
+                    bg = Image.new("RGBA", (target_w, target_h), (255, 255, 255, 255))
+                
+                bg.alpha_composite(img_resized, ((target_w - img_resized.size[0]) // 2, (target_h - img_resized.size[1]) // 2))
+                res_img = bg
+                del img_resized
 
         res_img = ImageEnhance.Brightness(res_img).enhance(config['bright'])
         res_img = ImageEnhance.Sharpness(res_img).enhance(config['sharp'])
 
         out_io = io.BytesIO()
         
+        is_transparent_out = (config['bg_mode'] == "特定颜色" and config['pure_color'] == "透明")
         if is_transparent_out:
             res_img.save(out_io, format="PNG")
             val = out_io.getvalue()
@@ -234,8 +240,9 @@ with left_col:
     with st.container():
         # 1. 规格设置 (默认展开)
         with st.expander("规格设置", expanded=True):
+            # 新增：“不调整尺寸(保持原图)” 选项放在第一项作为默认选中值
             res_map = {
-                "请选择...": "none", 
+                "不调整尺寸(保持原图)": "none", 
                 "聚合标准 (1920*1080)": "1920*1080", 
                 "Kiosk/Emenu标准 (5:3)": "1000*600", 
                 "封面图 (1080*1250)": "1080*1250",
@@ -244,8 +251,6 @@ with left_col:
             }
             res_label = st.selectbox("比例预设", list(res_map.keys()), key=f"res_{st.session_state.settings_key}")
             
-            vol_default_idx = 1 if res_label != "请选择..." else 0
-            
             if res_label == "自定义尺寸":
                 col_w, col_h = st.columns(2)
                 with col_w:
@@ -253,12 +258,18 @@ with left_col:
                 with col_h:
                     th = st.number_input("高 (px)", 100, 4000, 1080, key=f"th_{st.session_state.settings_key}")
                 dim_name = f"{tw}-{th}"
+                target_dim = (tw, th)
+            elif res_map[res_label] == "none":
+                # 选择不调整尺寸时，目标尺寸设为 None，保持原图导出
+                dim_name = "original"
+                target_dim = None
             else:
                 raw_val = res_map[res_label]
-                tw, th = (1920, 1080) if raw_val == "none" else map(int, raw_val.split('*'))
+                tw, th = map(int, raw_val.split('*'))
                 dim_name = "5-3" if "5:3" in res_label else raw_val.replace("*", "-")
+                target_dim = (tw, th)
 
-            vol_opt = st.selectbox("体积控制", ["不限制", "500KB", "1MB", "自定义"], index=vol_default_idx, key=f"vol_{st.session_state.settings_key}")
+            vol_opt = st.selectbox("体积控制", ["不限制", "500KB", "1MB", "自定义"], index=0, key=f"vol_{st.session_state.settings_key}")
             if vol_opt == "自定义":
                 kb = st.number_input("最大体积限制 (KB)", 10, 10240, 800, key=f"custom_kb_{st.session_state.settings_key}")
             else:
@@ -277,7 +288,7 @@ with left_col:
                     with col_cy:
                         crop_y = st.slider("纵向焦点 (上← →下)", 0.0, 1.0, 0.5, 0.05, key=f"cy_{st.session_state.settings_key}")
 
-        # 2. 视觉设置 (设置 expanded=True，默认展开)
+        # 2. 视觉设置 (默认展开)
         with st.expander("视觉设置", expanded=True):
             bg_m = st.selectbox("背景模式", ["深度高斯模糊", "特定颜色"], key=f"bgm_{st.session_state.settings_key}")
             p_color = "白色"
@@ -296,7 +307,7 @@ with right_col:
     st.subheader("实时预览与导出")
     if processed_list:
         conf = {
-            'size': (tw, th), 
+            'size': target_dim, 
             'limit_kb': kb, 
             'bg_mode': bg_m, 
             'pure_color': p_color, 
@@ -338,7 +349,7 @@ with right_col:
 
         st.write("---")
 
-        # 2. 导出下载逻辑（含文件名重构、重名自动加编号与 .jpg 后缀）
+        # 2. 导出下载逻辑
         if len(processed_list) == 1:
             data, ext = final_outputs[0]
             if data:
@@ -358,7 +369,6 @@ with right_col:
                     if data:
                         raw_stem = edited_names[idx].strip() if idx < len(edited_names) and edited_names[idx].strip() else os.path.splitext(item["name"])[0]
                         
-                        # 重名检测：如果文件名重复，自动补齐 _1, _2 后缀，保证 40 张图全部完整导出
                         if raw_stem in filename_counts:
                             filename_counts[raw_stem] += 1
                             final_stem = f"{raw_stem}_{filename_counts[raw_stem]}"
